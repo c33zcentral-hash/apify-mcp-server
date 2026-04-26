@@ -84,7 +84,7 @@ This document maps observed security behaviors, controls, and patterns in the Ap
 
 ### T1070 - Indicator Removal on Host
 **Observed Behaviors:**
-- Log sanitization in [`src/utils/logging.ts`](src/utils/logging.ts:64) - redacts sensitive information
+- Log sanitization in [`src/utils/logging.ts`](src/utils/logging.ts:70) - redacts sensitive information
 - Skyfire payment ID sanitization - removes payment tokens from logs
 - Error message sanitization in [`src/mcp/client.ts`](src/mcp/client.ts:45) - sanitizes error messages
 
