@@ -78,7 +78,7 @@
     "openai": "^6.10.0",
     "p-limit": "^6.1.0",
     "tsx": "^4.20.6",
-    "typescript": "^5.3.3",
+    "typescript": "^5.9.3",
     "typescript-eslint": "^8.23.0",
     "vitest": "^3.0.8"
   },

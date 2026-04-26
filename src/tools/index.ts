@@ -11,6 +11,14 @@ export const unauthEnabledTools: string[] = [
     HelperTools.DOCS_FETCH,
     HelperTools.STORE_SEARCH,
     HelperTools.ACTOR_GET_DETAILS,
+    // 3D/CAD tools - can work without auth in local mode
+    HelperTools.CREATE_CAD_JOB,
+    HelperTools.GET_CAD_JOB_STATUS,
+    HelperTools.GET_CAD_JOB_RESULT,
+    HelperTools.CREATE_MESH_JOB,
+    HelperTools.GET_MESH_JOB_STATUS,
+    HelperTools.GET_MESH_JOB_RESULT,
+    HelperTools.CANCEL_JOB,
 ];
 
 // Re-export from categories.ts

@@ -47,6 +47,14 @@ export enum HelperTools {
     DOCS_SEARCH = 'search-apify-docs',
     DOCS_FETCH = 'fetch-apify-docs',
     GET_HTML_SKELETON = 'get-html-skeleton',
+    // 3D/CAD tools
+    CREATE_CAD_JOB = 'create-cad-job',
+    GET_CAD_JOB_STATUS = 'get-cad-job-status',
+    GET_CAD_JOB_RESULT = 'get-cad-job-result',
+    CREATE_MESH_JOB = 'create-mesh-job',
+    GET_MESH_JOB_STATUS = 'get-mesh-job-status',
+    GET_MESH_JOB_RESULT = 'get-mesh-job-result',
+    CANCEL_JOB = 'cancel-job',
 }
 
 export const RAG_WEB_BROWSER = 'apify/rag-web-browser';
