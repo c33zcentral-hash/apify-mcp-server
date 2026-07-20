@@ -1,7 +1,8 @@
 import type { Actor } from 'apify-client';
 import { describe, expect, it } from 'vitest';
 
-import type { ActorStoreList } from '../../src/types.js';
+import { MAX_INPUT_FIELDS_IN_ACTOR_CARD } from '../../src/const.js';
+import type { ActorStoreInputSchema, ActorStoreList } from '../../src/types.js';
 import { formatActorToActorCard, formatActorToStructuredCard } from '../../src/utils/actor_card.js';
 
 // Mock Actor data for testing (based on real apify/rag-web-browser Actor)
@@ -82,6 +83,19 @@ const mockDeprecatedActor: Actor = {
     title: 'Deprecated RAG Browser',
     isDeprecated: true,
 } as unknown as Actor;
+
+function buildInputSchema(fieldCount: number): ActorStoreInputSchema {
+    const properties: ActorStoreInputSchema['properties'] = {};
+    for (let i = 0; i < fieldCount; i++) {
+        properties[`field${i}`] = { type: 'string' };
+    }
+
+    return {
+        type: 'object',
+        properties,
+        required: Object.keys(properties),
+    };
+}
 
 describe('formatActorToActorCard', () => {
     describe('backwards compatibility (no options)', () => {
@@ -360,7 +374,7 @@ describe('formatActorToStructuredCard', () => {
 
             // Should include rating
             expect(result.rating).toBeDefined();
-            expect(result.rating?.average).toBe(4.94598340350167);
+            expect(result.rating?.average).toBe(4.95);
             expect(result.rating?.count).toBe(14);
 
             // Should include metadata (developer, categories, dates, deprecation)
@@ -467,7 +481,6 @@ describe('formatActorToStructuredCard', () => {
 
             // Should have default pricing
             expect(result.pricing.model).toBe('FREE');
-            expect(result.pricing.isFree).toBe(true);
         });
 
         it('should include actual pricing when includePricing is true', () => {
@@ -480,7 +493,6 @@ describe('formatActorToStructuredCard', () => {
             });
 
             expect(result.pricing.model).toBe('PER_ACTOR_RUN');
-            expect(result.pricing.isFree).toBe(false);
         });
     });
 
@@ -574,5 +586,89 @@ describe('formatActorToStructuredCard', () => {
             expect(result.developer.username).toBe('');
             expect(result.modifiedAt).toBeUndefined();
         });
+    });
+});
+
+describe('formatActorToStructuredCard inputSchema truncation', () => {
+    it('truncates inputFields and marks incomplete schemas', () => {
+        const total = MAX_INPUT_FIELDS_IN_ACTOR_CARD + 5;
+        const actor = { ...mockActorStoreList, inputSchema: buildInputSchema(total) } as ActorStoreList;
+        const result = formatActorToStructuredCard(actor);
+
+        expect(Object.keys(result.inputFields?.properties ?? {})).toHaveLength(MAX_INPUT_FIELDS_IN_ACTOR_CARD);
+        expect(result.inputFields?.properties[`field${MAX_INPUT_FIELDS_IN_ACTOR_CARD - 1}`]).toStrictEqual({
+            type: 'string',
+        });
+        expect(result.inputFields?.properties[`field${MAX_INPUT_FIELDS_IN_ACTOR_CARD}`]).toBeUndefined();
+        expect(result.inputFields?.required).toEqual(
+            Array.from({ length: MAX_INPUT_FIELDS_IN_ACTOR_CARD }, (_, index) => `field${index}`),
+        );
+        expect(result.inputFieldsTruncated).toBe(true);
+        expect(result.inputFieldsTotalCount).toBe(total);
+    });
+
+    it('leaves inputFields unchanged when schema fits under the cap', () => {
+        const inputSchema: ActorStoreInputSchema = {
+            type: 'object',
+            properties: {
+                url: { type: 'string' },
+                maxResults: { type: 'number' },
+            },
+            required: ['url'],
+        };
+        const actor = { ...mockActorStoreList, inputSchema } as ActorStoreList;
+        const result = formatActorToStructuredCard(actor);
+
+        expect(result.inputFields).toStrictEqual(inputSchema);
+        expect(result.inputFieldsTruncated).toBeUndefined();
+        expect(result.inputFieldsTotalCount).toBeUndefined();
+    });
+});
+
+describe('formatActorToActorCard inputSchema rendering', () => {
+    const inputSchema = {
+        type: 'object' as const,
+        properties: {
+            url: { type: 'string' },
+            maxResults: { type: 'number' },
+        },
+        required: ['url'],
+    };
+
+    it('renders input fields as a TypeScript-like inline list with required marker', () => {
+        const actor = { ...mockActorStoreList, inputSchema } as ActorStoreList;
+        const result = formatActorToActorCard(actor);
+        expect(result).toContain('- **Input fields:** url: string, maxResults?: number');
+        expect(result).not.toMatch(/\(\+\d+ more\)/);
+    });
+
+    it(`truncates to MAX_INPUT_FIELDS_IN_ACTOR_CARD and appends "... (+N more)" when count exceeds the cap`, () => {
+        const overflow = 5;
+        const total = MAX_INPUT_FIELDS_IN_ACTOR_CARD + overflow;
+        const properties: Record<string, { type: string }> = {};
+        for (let i = 0; i < total; i++) properties[`field${i}`] = { type: 'string' };
+        const actor = { ...mockActorStoreList, inputSchema: { type: 'object' as const, properties } } as ActorStoreList;
+        const result = formatActorToActorCard(actor);
+        expect(result).toContain(`field${MAX_INPUT_FIELDS_IN_ACTOR_CARD - 1}?: string`);
+        expect(result).not.toContain(`field${MAX_INPUT_FIELDS_IN_ACTOR_CARD}?: string`);
+        expect(result).toContain(` ... (+${overflow} more)`);
+    });
+
+    it('joins mixed-type property arrays with `|`', () => {
+        const actor = {
+            ...mockActorStoreList,
+            inputSchema: { type: 'object' as const, properties: { mixed: { type: ['string', 'integer'] } } },
+        } as unknown as ActorStoreList;
+        const result = formatActorToActorCard(actor);
+        expect(result).toContain('- **Input fields:** mixed?: string|integer');
+    });
+
+    it('omits the input fields line when inputSchema has no properties', () => {
+        const actor = {
+            ...mockActorStoreList,
+            inputSchema: { type: 'object' as const, properties: {} },
+        } as ActorStoreList;
+        const result = formatActorToActorCard(actor);
+        expect(result).not.toContain('Input fields');
     });
 });

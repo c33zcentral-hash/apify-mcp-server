@@ -5,6 +5,9 @@
  * at runtime.
  */
 
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps';
 import type { Resource } from '@modelcontextprotocol/sdk/types.js';
 
@@ -40,7 +43,6 @@ const OPENAI_WIDGET_CSP = {
 const WIDGET_BASE_UI = {
     visibility: ['model', 'app'] as const,
     prefersBorder: true,
-    domain: WIDGET_DOMAIN,
     csp: WIDGET_CSP,
 } as const;
 
@@ -50,24 +52,23 @@ export const WIDGET_URIS = {
 } as const;
 
 type WidgetMeta = NonNullable<Resource['_meta']> & {
-  // ChatGPT UX hints (does not affect MCP Jam renderer detection)
-  'openai/toolInvocation/invoking'?: string;
-  'openai/toolInvocation/invoked'?: string;
-  // ChatGPT-specific compatibility keys (OpenAI aliases for standard _meta.ui.* fields)
-  // See: https://developers.openai.com/apps-sdk/reference/#_meta-fields-on-tool-descriptor
-  //      https://developers.openai.com/apps-sdk/reference/#component-resource-_meta-fields
-  // 'openai/widgetAccessible'?: boolean;
-  'openai/widgetCSP'?: typeof OPENAI_WIDGET_CSP;
-  // 'openai/widgetPrefersBorder'?: boolean;
-  // 'openai/widgetDomain'?: string;
-  // MCP Apps standard metadata (SEP-1865)
-  ui: {
-    resourceUri: string;
-    visibility: readonly string[];
-    prefersBorder: boolean;
-    domain: string;
-    csp: typeof WIDGET_CSP;
-  };
+    // ChatGPT UX hints (does not affect MCP Jam renderer detection)
+    'openai/toolInvocation/invoking'?: string;
+    'openai/toolInvocation/invoked'?: string;
+    // ChatGPT-specific compatibility keys (OpenAI aliases for standard _meta.ui.* fields)
+    // See: https://developers.openai.com/apps-sdk/reference/#_meta-fields-on-tool-descriptor
+    //      https://developers.openai.com/apps-sdk/reference/#component-resource-_meta-fields
+    // 'openai/widgetAccessible'?: boolean;
+    'openai/widgetCSP'?: typeof OPENAI_WIDGET_CSP;
+    // 'openai/widgetPrefersBorder'?: boolean;
+    'openai/widgetDomain'?: string;
+    // MCP Apps standard metadata (SEP-1865)
+    ui: {
+        resourceUri: string;
+        visibility: readonly string[];
+        prefersBorder: boolean;
+        csp: typeof WIDGET_CSP;
+    };
 };
 
 /**
@@ -81,12 +82,14 @@ type WidgetMeta = NonNullable<Resource['_meta']> & {
  *
  * The `openai/toolInvocation/*` keys are safe — they're UX hints only and don't affect
  * renderer detection.
+ *
+ * `_meta.ui.domain` intentionally omitted. Claude hashes the literal connector
+ * URL (including `?tools=...`, `?ui=true`); no static value can match. Spec
+ * lists OAuth/CORS/API-key allowlists as use cases — none apply (DCR for OAuth,
+ * `api.apify.com` is `Access-Control-Allow-Origin: *`, bearer-token auth).
+ * ChatGPT uses `openai/widgetDomain` below, unaffected.
  */
-function createWidgetMeta(params: {
-    resourceUri: string;
-    invoking: string;
-    invoked: string;
-}): WidgetMeta {
+function createWidgetMeta(params: { resourceUri: string; invoking: string; invoked: string }): WidgetMeta {
     const { resourceUri, invoking, invoked } = params;
 
     return {
@@ -97,23 +100,22 @@ function createWidgetMeta(params: {
         // 'openai/widgetAccessible': true,
         'openai/widgetCSP': OPENAI_WIDGET_CSP,
         // 'openai/widgetPrefersBorder': WIDGET_BASE_UI.prefersBorder,
-        // 'openai/widgetDomain': WIDGET_BASE_UI.domain,
+        'openai/widgetDomain': WIDGET_DOMAIN,
         ui: { ...WIDGET_BASE_UI, resourceUri },
     };
 }
 
 export type WidgetConfig = {
-  uri: Resource['uri'];
-  name: Resource['name'];
-  description: NonNullable<Resource['description']>;
-  jsFilename: string;
-  title: NonNullable<Resource['title']>;
-  meta: WidgetMeta;
+    uri: Resource['uri'];
+    name: Resource['name'];
+    description: NonNullable<Resource['description']>;
+    jsFilename: string;
+    title: NonNullable<Resource['title']>;
+    meta: WidgetMeta;
 };
 
 /**
- * Widget registry configuration
- * Maps widget URIs to their configuration
+ * Widget registry, keyed by URI.
  */
 export const WIDGET_REGISTRY: Record<string, WidgetConfig> = {
     [WIDGET_URIS.SEARCH_ACTORS]: {
@@ -143,8 +145,8 @@ export const WIDGET_REGISTRY: Record<string, WidgetConfig> = {
 };
 
 export type AvailableWidget = WidgetConfig & {
-  jsPath: string;
-  exists: boolean;
+    jsPath: string;
+    exists: boolean;
 };
 
 /**
@@ -154,15 +156,12 @@ export type AvailableWidget = WidgetConfig & {
  * @returns Map of widget URIs to their resolved state
  */
 export async function resolveAvailableWidgets(baseDir: string): Promise<Map<string, AvailableWidget>> {
-    const fs = await import('node:fs');
-    const path = await import('node:path');
-
     const resolvedWidgets = new Map<string, AvailableWidget>();
-    const webDistPath = path.resolve(baseDir, '../web/dist');
+    const webDistPath = resolve(baseDir, '../web/dist');
 
     for (const [uri, config] of Object.entries(WIDGET_REGISTRY)) {
-        const jsPath = path.resolve(webDistPath, config.jsFilename);
-        const exists = fs.existsSync(jsPath);
+        const jsPath = resolve(webDistPath, config.jsFilename);
+        const exists = existsSync(jsPath);
 
         resolvedWidgets.set(uri, {
             ...config,
@@ -182,4 +181,15 @@ export async function resolveAvailableWidgets(baseDir: string): Promise<Map<stri
  */
 export function getWidgetConfig(uri: string): WidgetConfig | undefined {
     return WIDGET_REGISTRY[uri];
+}
+
+/**
+ * Actor-run widget `_meta`, with a per-run `openai/widgetDescription` merged in.
+ * Shared by `buildStartRunWidgetResponse` and `buildGetActorRunWidgetResponse`.
+ */
+export function buildActorRunWidgetMeta(descriptionName: string): NonNullable<Resource['_meta']> {
+    return {
+        ...(getWidgetConfig(WIDGET_URIS.ACTOR_RUN)?.meta ?? {}),
+        'openai/widgetDescription': `Actor run progress for ${descriptionName}`,
+    };
 }

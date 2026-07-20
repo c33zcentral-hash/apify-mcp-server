@@ -9,45 +9,64 @@ export const ACTOR_MAX_MEMORY_MBYTES = 4_096; // If the Actor requires 8GB of me
 
 // Tool output
 /**
- * Usual tool output limit is 25k tokens where 1 token =~ 4 characters
- * thus 50k chars so we have some buffer because there was some issue with Claude code Actor call output token count.
- * This is primarily used for Actor tool call output, but we can then
- * reuse this in other tools as well.
+ * Content larger than this is linked out instead of inlined, since inlining it would blow up the context
+ * window (base64 inflates a binary payload ~33%, and a large text/JSON body overflows it just as easily).
+ * The key-value-store-record tool caps binaries here (link to a fetchable URL); the API-resource proxy
+ * caps every body here — its download is also aborted mid-flight at this limit via axios `maxContentLength`.
  */
-export const TOOL_MAX_OUTPUT_CHARS = 50000;
+export const MAX_INLINE_BYTES = 256 * 1024;
+
+/**
+ * Advisory threshold (uncompressed bytes) above which dataset tools append a size hint steering the
+ * caller to narrow the fetch. A soft hint, not a truncation cap; ~50 KB mirrors the ~25k-token budget.
+ */
+export const DATASET_SIZE_HINT_BYTES = 50000;
+
+/** Shared steer appended to large-output hints so the model narrows instead of refetching everything. */
+export const NARROW_OUTPUT_HINT = 'narrow with fields= or page with offset';
 
 // MCP Server
+/** When `false`, `resolveServerMode('auto', ...)` forces {@link SERVER_MODE.DEFAULT} regardless of client capabilities. */
+export const SERVER_MODE_AUTO_DETECTION_ENABLED = true;
+
 export const SERVER_NAME = 'apify-mcp-server';
 export const SERVER_TITLE = 'Apify MCP Server';
-export const SERVER_VERSION = '1.0.0';
+export const HELPER_TOOLS = {
+    ACTOR_ADD: 'add-actor',
+    ACTOR_CALL: 'call-actor',
+    ACTOR_CALL_WIDGET: 'call-actor-widget',
+    ACTOR_GET_DETAILS: 'fetch-actor-details',
+    ACTOR_GET_DETAILS_WIDGET: 'fetch-actor-details-widget',
+    ACTOR_RUNS_ABORT: 'abort-actor-run',
+    ACTOR_RUNS_GET: 'get-actor-run',
+    ACTOR_RUNS_GET_WIDGET: 'get-actor-run-widget',
+    ACTOR_RUNS_LOG: 'get-actor-log',
+    ACTOR_RUN_LIST_GET: 'get-actor-run-list',
+    DATASET_GET: 'get-dataset',
+    DATASET_LIST_GET: 'get-dataset-list',
+    DATASET_GET_ITEMS: 'get-dataset-items',
+    DATASET_SCHEMA_GET: 'get-dataset-schema',
+    KEY_VALUE_STORE_LIST_GET: 'get-key-value-store-list',
+    KEY_VALUE_STORE_GET: 'get-key-value-store',
+    KEY_VALUE_STORE_KEYS_GET: 'get-key-value-store-keys',
+    KEY_VALUE_STORE_RECORD_GET: 'get-key-value-store-record',
+    STORE_SEARCH: 'search-actors',
+    STORE_SEARCH_WIDGET: 'search-actors-widget',
+    DOCS_SEARCH: 'search-apify-docs',
+    DOCS_FETCH: 'fetch-apify-docs',
+    PROBLEM_REPORT: 'report-problem',
+} as const;
+export type HelperToolName = (typeof HELPER_TOOLS)[keyof typeof HELPER_TOOLS];
 
-// User agent headers
-export const USER_AGENT_ORIGIN = 'Origin/mcp-server';
-
-export enum HelperTools {
-    ACTOR_ADD = 'add-actor',
-    ACTOR_CALL = 'call-actor',
-    ACTOR_GET_DETAILS = 'fetch-actor-details',
-    ACTOR_GET_DETAILS_INTERNAL = 'fetch-actor-details-internal',
-    ACTOR_OUTPUT_GET = 'get-actor-output',
-    ACTOR_RUNS_ABORT = 'abort-actor-run',
-    ACTOR_RUNS_GET = 'get-actor-run',
-    ACTOR_RUNS_LOG = 'get-actor-log',
-    ACTOR_RUN_LIST_GET = 'get-actor-run-list',
-    DATASET_GET = 'get-dataset',
-    DATASET_LIST_GET = 'get-dataset-list',
-    DATASET_GET_ITEMS = 'get-dataset-items',
-    DATASET_SCHEMA_GET = 'get-dataset-schema',
-    KEY_VALUE_STORE_LIST_GET = 'get-key-value-store-list',
-    KEY_VALUE_STORE_GET = 'get-key-value-store',
-    KEY_VALUE_STORE_KEYS_GET = 'get-key-value-store-keys',
-    KEY_VALUE_STORE_RECORD_GET = 'get-key-value-store-record',
-    STORE_SEARCH = 'search-actors',
-    STORE_SEARCH_INTERNAL = 'search-actors-internal',
-    DOCS_SEARCH = 'search-apify-docs',
-    DOCS_FETCH = 'fetch-apify-docs',
-    GET_HTML_SKELETON = 'get-html-skeleton',
-}
+/**
+ * Client-name substrings (lowercased, matched against `clientInfo.name`) that `report-problem` is
+ * hidden from. Applied once per connection in the compose step, where the client is known.
+ * `report-problem` is hidden from Anthropic surfaces (Claude.ai / Claude Desktop / Claude Code /
+ * `local-agent-mode-apify`) pending the directory review. Substring matching covers new client builds
+ * without a maintained allowlist; over-matching only hides an optional tool, which is the safe failure
+ * mode.
+ */
+export const REPORT_PROBLEM_BLOCKED_CLIENTS: string[] = ['claude', 'anthropic', 'local-agent-mode-apify'];
 
 export const RAG_WEB_BROWSER = 'apify/rag-web-browser';
 export const RAG_WEB_BROWSER_WHITELISTED_FIELDS = ['query', 'maxResults', 'outputFormats'];
@@ -62,51 +81,13 @@ Examples of when to use:
 This is for general web scraping and immediate data needs. For repeated/scheduled scraping of specific platforms (e-commerce, social media), consider suggesting a specialized Actor from the Store for better performance and reliability.`;
 
 export const defaults = {
-    actors: [
-        RAG_WEB_BROWSER,
-    ],
+    actors: [RAG_WEB_BROWSER],
 };
 
-export const SKYFIRE_MIN_CHARGE_USD = 5.0;
-export const SKYFIRE_SELLER_ID = process.env.SKYFIRE_SELLER_SERVICE_ID;
-
-export const SKYFIRE_TOOL_INSTRUCTIONS = `To run the Actor, you need to provide a Skyfire PAY JWT token in the \`skyfire-pay-id\` input property. You first need to create the Skyfire PAY token by calling the \`create-pay-token\` tool from the Skyfire MCP server and then provide the created JWT token in the \`skyfire-pay-id\` input property when calling Actor tool. IMPORTANT: The value you pass to \`skyfire-pay-id\` must be the JWT token string itself (it starts with "ey"), NOT an ID or UUID. The Skyfire PAY token is used for billing purposes and needs to be charged with at least ${SKYFIRE_MIN_CHARGE_USD} USD.${SKYFIRE_SELLER_ID ? ` The Skyfire seller ID for Apify MCP server is "${SKYFIRE_SELLER_ID}".` : ''} When retrieving Actor output using the \`get-actor-output\` tool, you also need to provide the same Skyfire PAY JWT token (starting with "ey") in the \`skyfire-pay-id\` input property.`;
-
-export const SKYFIRE_PAY_ID_PROPERTY_DESCRIPTION = `Skyfire PAY JWT token used for billing purposes. This must be the JWT token string returned by the create-pay-token tool (starts with "ey"), NOT a token ID or UUID.`;
-
-export const SKYFIRE_README_CONTENT = `The Apify MCP Server allows clients to interact with Apify Actors, storage, and documentation. Before running any Apify Actor, you need to set up a Skyfire PAY token for billing purposes. To set up the PAY token you need to use the create-pay-token tool from the Skyfire MCP server. The PAY token must be charged with a minimum of ${SKYFIRE_MIN_CHARGE_USD} USD to be valid.${SKYFIRE_SELLER_ID ? ` The Skyfire seller ID for Apify MCP server is "${SKYFIRE_SELLER_ID}".` : ''} When running an Actor using the call-actor tool, you must provide the Skyfire PAY JWT token in the \`skyfire-pay-id\` input property. IMPORTANT: The value for \`skyfire-pay-id\` must be the actual JWT token string (starting with "ey") returned by the create-pay-token tool, NOT a token ID or UUID. Similarly, when retrieving Actor output using the get-actor-output tool, you must also provide the same Skyfire PAY JWT token (starting with "ey") in the \`skyfire-pay-id\` input property.`;
-
-/**
- * Set of internal tool names that require Skyfire PAY token ID in Skyfire mode.
- * These tools interact with Actor runs, datasets, or key-value stores and need billing support.
- */
-export const SKYFIRE_ENABLED_TOOLS = new Set([
-    HelperTools.ACTOR_CALL,
-    HelperTools.ACTOR_OUTPUT_GET,
-    HelperTools.ACTOR_RUNS_GET,
-    HelperTools.ACTOR_RUNS_LOG,
-    HelperTools.ACTOR_RUNS_ABORT,
-    HelperTools.DATASET_GET,
-    HelperTools.DATASET_GET_ITEMS,
-    HelperTools.DATASET_SCHEMA_GET,
-    HelperTools.KEY_VALUE_STORE_GET,
-    HelperTools.KEY_VALUE_STORE_KEYS_GET,
-    HelperTools.KEY_VALUE_STORE_RECORD_GET,
-]);
-
-export const CALL_ACTOR_MCP_MISSING_TOOL_NAME_MSG = `When calling an MCP server Actor, you must specify the tool name in the actor parameter as "{actorName}:{toolName}" in the "actor" input property.`;
-
-// Cache
-export const ACTOR_CACHE_MAX_SIZE = 500;
-export const ACTOR_CACHE_TTL_SECS = 30 * 60; // 30 minutes
-export const APIFY_DOCS_CACHE_MAX_SIZE = 500;
-export const APIFY_DOCS_CACHE_TTL_SECS = 60 * 60; // 1 hour
-export const GET_HTML_SKELETON_CACHE_TTL_SECS = 5 * 60; // 5 minutes
-export const GET_HTML_SKELETON_CACHE_MAX_SIZE = 200;
-export const MCP_SERVER_CACHE_MAX_SIZE = 500;
-export const MCP_SERVER_CACHE_TTL_SECS = 30 * 60; // 30 minutes
-export const USER_CACHE_MAX_SIZE = 200;
-export const USER_CACHE_TTL_SECS = 60 * 60; // 1 hour
+/** API rejects `includeInputSchema=true` above this; mirrors apify-core `MAX_LIMIT_WITH_INPUT_SCHEMA`. */
+export const MAX_LIMIT_WITH_INPUT_SCHEMA = 10;
+/** Max input fields shown inline in text and structured Actor cards. */
+export const MAX_INPUT_FIELDS_IN_ACTOR_CARD = 20;
 
 export const ACTOR_PRICING_MODEL = {
     /** Rental Actors */
@@ -118,14 +99,6 @@ export const ACTOR_PRICING_MODEL = {
     PAY_PER_EVENT: 'PAY_PER_EVENT',
 } as const;
 
-/**
- * Used in search Actors tool to search above the input supplied limit,
- * so we can safely filter out rental Actors from the search and ensure we return some results.
- */
-export const ACTOR_SEARCH_ABOVE_LIMIT = 50;
-
-export const MCP_STREAMABLE_ENDPOINT = '/mcp';
-
 export const DOCS_SOURCES = [
     {
         id: 'apify',
@@ -135,8 +108,8 @@ export const DOCS_SOURCES = [
         indexName: 'test_test_apify_sdk',
         filters: 'version:latest',
         description:
-            'Apify Platform documentation including: Platform features, SDKs (JS, Python), CLI, '
-            + 'REST API, Academy (web scraping fundamentals), Actor development and deployment',
+            'Apify Platform documentation including: Platform features, SDKs (JS, Python), CLI, ' +
+            'REST API, Academy (web scraping fundamentals), Actor development and deployment',
     },
     {
         id: 'crawlee-js',
@@ -147,8 +120,8 @@ export const DOCS_SOURCES = [
         typeFilter: 'lvl1', // Filter to page-level results only (Docusaurus lvl1)
         facetFilters: ['language:en', ['docusaurus_tag:default', 'docusaurus_tag:docs-default-3.15']],
         description:
-            'Crawlee is a web scraping library for JavaScript. '
-            + 'It handles blocking, crawling, proxies, and browsers for you.',
+            'Crawlee is a web scraping library for JavaScript. ' +
+            'It handles blocking, crawling, proxies, and browsers for you.',
     },
     {
         id: 'crawlee-py',
@@ -159,20 +132,38 @@ export const DOCS_SOURCES = [
         typeFilter: 'lvl1', // Filter to page-level results only (Docusaurus lvl1)
         facetFilters: ['language:en', ['docusaurus_tag:docs-default-current']],
         description:
-            'Crawlee is a web scraping library for Python. '
-            + 'It handles blocking, crawling, proxies, and browsers for you.',
+            'Crawlee is a web scraping library for Python. ' +
+            'It handles blocking, crawling, proxies, and browsers for you.',
     },
 ] as const;
 
-export const ALLOWED_DOC_DOMAINS = [
-    'https://docs.apify.com',
-    'https://crawlee.dev',
-] as const;
+/**
+ * Word window for Algolia `attributesToSnippet` in `search-apify-docs`. Bounds each hit to a
+ * match-centered snippet instead of the full indexed `content` attribute — API-reference records
+ * inline the whole OpenAPI schema (~34.5k chars each), so 20 hits returned ~173k tokens. The agent
+ * fetches full pages via `fetch-apify-docs`.
+ */
+export const DOCS_SNIPPET_MAX_WORDS = 100;
 
-export const PROGRESS_NOTIFICATION_INTERVAL_MS = 5_000; // 5 seconds
+/**
+ * Sentinel used as Algolia `highlightPreTag`/`highlightPostTag` for docs snippets, stripped before
+ * returning. An empty-string tag is treated as "unset" and falls back to Algolia's default
+ * `<span class="algolia-docsearch-suggestion--highlight">` markup, so we set a private-use
+ * character (U+E000) and remove it.
+ */
+export const DOCS_SNIPPET_HIGHLIGHT_TAG = '\uE000';
+
+export const ALLOWED_DOC_DOMAINS = ['https://docs.apify.com', 'https://crawlee.dev'] as const;
 
 export const APIFY_STORE_URL = 'https://apify.com';
+/** Apify Console origin (production). */
+export const CONSOLE_BASE_URL = 'https://console.apify.com';
+/** Apify Console origin on the staging cluster, selected when running on the staging MCP host. */
+export const CONSOLE_BASE_URL_STAGING = 'https://console-securitybyobscurity.apify.com';
+/** Staging MCP host; mirrors the check in `getActorMCPServerURL` to pick staging vs production origins. */
+export const STAGING_MCP_HOSTNAME = 'mcp-securitybyobscurity.apify.com';
 export const APIFY_FAVICON_URL = `${APIFY_STORE_URL}/favicon.ico`;
+export const APIFY_LOGO_URL = `${APIFY_STORE_URL}/apple-icon.png`;
 export const APIFY_MCP_URL = 'https://mcp.apify.com';
 export const APIFY_DOCS_MCP_URL = 'https://docs.apify.com/platform/integrations/mcp';
 
@@ -185,17 +176,9 @@ export const TELEMETRY_ENV = {
 export const DEFAULT_TELEMETRY_ENABLED = true;
 export const DEFAULT_TELEMETRY_ENV = TELEMETRY_ENV.PROD;
 
-// We are using the same values as apify-core for consistency (despite that we ship events of different types).
-// https://github.com/apify/apify-core/blob/2284766c122c6ac5bc4f27ec28051f4057d6f9c0/src/packages/analytics/src/server/segment.ts#L28
-// Reasoning from the apify-core:
-// Flush at 50 events to avoid sending too many small requests (default is 15)
-export const SEGMENT_FLUSH_AT_EVENTS = 50;
-// Flush interval in milliseconds (default is 10000)
-export const SEGMENT_FLUSH_INTERVAL_MS = 5_000;
-
 // Tool status
 /**
- * Unified status constants for tool execution lifecycle.
+ * Unified status constants for the tool execution lifecycle.
  * Single source of truth for all tool status values.
  */
 export const TOOL_STATUS = {
@@ -204,6 +187,24 @@ export const TOOL_STATUS = {
     ABORTED: 'ABORTED',
     SOFT_FAIL: 'SOFT_FAIL',
 } as const;
+
+export const FAILURE_CATEGORY = {
+    INVALID_INPUT: 'INVALID_INPUT',
+    AUTH: 'AUTH',
+    PERMISSION_APPROVAL_REQUIRED: 'PERMISSION_APPROVAL_REQUIRED',
+    INTERNAL_ERROR: 'INTERNAL_ERROR',
+} as const;
+
+// Apify API error types
+export const APIFY_ERROR_TYPE_FULL_PERMISSION_NOT_APPROVED = 'full-permission-actor-not-approved';
+export const APIFY_ERROR_TYPE_MEMORY_LIMIT_EXCEEDED = 'memory-limit-exceeded';
+export const APIFY_ERROR_TYPE_CANNOT_START_ACTOR_RUNS = 'cannot-start-actor-runs';
+
+// HTTP status codes
+export const HTTP_UNAUTHORIZED = 401;
+export const HTTP_PAYMENT_REQUIRED = 402;
+export const HTTP_FORBIDDEN = 403;
+export const HTTP_NOT_FOUND = 404;
 
 // Modes that allow long running task tool executions
 export const ALLOWED_TASK_TOOL_EXECUTION_MODES = ['optional', 'required'] as const;

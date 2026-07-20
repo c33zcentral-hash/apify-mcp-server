@@ -5,11 +5,11 @@
  * Main CLI entry point for workflow evaluations
  *
  * Usage:
- *   npm run evals:workflow
- *   npm run evals:workflow -- --category basic
- *   npm run evals:workflow -- --id test-001
- *   npm run evals:workflow -- --verbose
- *   npm run evals:workflow -- --concurrency 10
+ *   pnpm run evals:workflow
+ *   pnpm run evals:workflow -- --category basic
+ *   pnpm run evals:workflow -- --id test-001
+ *   pnpm run evals:workflow -- --verbose
+ *   pnpm run evals:workflow -- --concurrency 10
  */
 
 import path from 'node:path';
@@ -21,13 +21,14 @@ import { hideBin } from 'yargs/helpers';
 import { filterByLineRanges } from '../shared/line_range_filter.js';
 import type { LineRange } from '../shared/line_range_parser.js';
 import { checkRangesOutOfBounds, parseLineRanges, validateLineRanges } from '../shared/line_range_parser.js';
-import { DEFAULT_TOOL_TIMEOUT_SECONDS, MODELS } from './config.js';
+import { DEFAULT_TOOL_TIMEOUT_SECONDS, MODELS, sanitizeEnvValue } from './config.js';
 import { executeConversation } from './conversation_executor.js';
 import { LlmClient } from './llm_client.js';
 import { McpClient } from './mcp_client.js';
-import type { EvaluationResult } from './output_formatter.js';
+import type { EvaluationResult, TestResultRecord } from './output_formatter.js';
 import { formatDetailedResult, formatResultsTable } from './output_formatter.js';
 import {
+    findBaselineRecord,
     loadResultsDatabase,
     saveResultsDatabase,
     updateResultsWithEvaluations,
@@ -47,7 +48,8 @@ type CliArgs = {
     toolTimeout?: number;
     concurrency?: number;
     output?: boolean;
-}
+    baseline?: string;
+};
 
 /**
  * Helper function to log messages with test ID prefix
@@ -75,7 +77,7 @@ async function runSingleTest(
     logWithPrefix(testId, `[${index + 1}/${total}] Running...`);
 
     // Create FRESH MCP instance per test for isolation
-    const mcpClient = new McpClient(argv.toolTimeout);
+    const mcpClient = new McpClient(argv.toolTimeout, testCase.failTools);
     const startTime = Date.now();
     let result: EvaluationResult;
 
@@ -108,7 +110,10 @@ async function runSingleTest(
             durationMs,
         };
 
-        logWithPrefix(testId, `  ${judgeResult.verdict === 'PASS' ? '✅' : '❌'} ${judgeResult.verdict} (${durationMs}ms)`);
+        logWithPrefix(
+            testId,
+            `  ${judgeResult.verdict === 'PASS' ? '✅' : '❌'} ${judgeResult.verdict} (${durationMs}ms)`,
+        );
     } catch (error) {
         const durationMs = Date.now() - startTime;
 
@@ -151,7 +156,7 @@ async function runSingleTest(
 
 async function main() {
     // Parse CLI arguments
-    const argv = await yargs(hideBin(process.argv))
+    const argv = (await yargs(hideBin(process.argv))
         .option('category', {
             type: 'string',
             description: 'Filter by test case category',
@@ -163,8 +168,9 @@ async function main() {
         .option('lines', {
             alias: 'l',
             type: 'string',
-            description: 'Filter by line range in test-cases.json '
-                + '(format: "start-end" or single line, comma-separated, e.g., "10-20,50-60,100")',
+            description:
+                'Filter by line range in test-cases.json ' +
+                '(format: "start-end" or single line, comma-separated, e.g., "10-20,50-60,100")',
         })
         .option('verbose', {
             type: 'boolean',
@@ -202,8 +208,13 @@ async function main() {
             description: 'Save test results to JSON file (evals/workflows/results.json)',
             default: false,
         })
-        .help()
-        .argv as CliArgs;
+        .option('baseline', {
+            type: 'string',
+            description:
+                'Results JSON file to compare against; prints byte/token deltas per test ' +
+                '(default: evals/workflows/results.json)',
+        })
+        .help().argv) as CliArgs;
 
     console.log('='.repeat(100));
     console.log('Workflow Evaluation Runner');
@@ -211,8 +222,8 @@ async function main() {
     console.log();
 
     // Check environment variables
-    const apifyToken = process.env.APIFY_TOKEN;
-    const openrouterKey = process.env.OPENROUTER_API_KEY;
+    const apifyToken = sanitizeEnvValue(process.env.APIFY_TOKEN);
+    const openrouterKey = sanitizeEnvValue(process.env.OPENROUTER_API_KEY);
 
     if (!apifyToken) {
         console.error('❌ Error: APIFY_TOKEN environment variable is required');
@@ -304,6 +315,43 @@ async function main() {
     console.log(`✅ Loaded ${filteredTestCases.length} test case(s)`);
     console.log();
 
+    // Load baseline for byte/token deltas (read before --output overwrites results.json).
+    // Matched by agent model + test ID; the judge model is ignored because bytes/tokens
+    // come from the agent, so a baseline recorded with a different judge still compares.
+    const baselinePath = argv.baseline ?? path.join(process.cwd(), 'evals/workflows/results.json');
+    const baselineByTestId = new Map<string, TestResultRecord>();
+    let baselineWithMetrics = 0;
+    try {
+        const baselineDb = loadResultsDatabase(baselinePath);
+        for (const testCase of filteredTestCases) {
+            const record = findBaselineRecord(baselineDb, argv.agentModel!, testCase.id);
+            if (!record) continue;
+            baselineByTestId.set(testCase.id, record);
+            // Records written before these metrics existed lack the fields at runtime.
+            if (record.resultBytes !== undefined || record.totalTokens !== undefined) {
+                baselineWithMetrics++;
+            }
+        }
+        // Explain the baseline state so a missing delta is never a silent mystery.
+        if (baselineWithMetrics > 0) {
+            console.log(`📐 Baseline: ${baselineWithMetrics} matching result(s) with metrics from ${baselinePath}`);
+        } else if (baselineByTestId.size > 0) {
+            console.log(
+                `📐 Baseline: ${baselineByTestId.size} matching result(s) in ${baselinePath}, but none record bytes/tokens yet. ` +
+                    `Re-run once with --output to capture them, then deltas appear next run.`,
+            );
+        } else {
+            console.log(
+                `📐 No baseline for agent model ${argv.agentModel} in ${baselinePath}. ` +
+                    `Run once with --output to record one (deltas need a prior --output run with the same agent model).`,
+            );
+        }
+        console.log();
+    } catch (error) {
+        console.error(`⚠️  Could not load baseline from ${baselinePath}: ${error}`);
+        console.log();
+    }
+
     // Initialize LLM client (shared across all tests - stateless)
     const llmClient = new LlmClient();
 
@@ -329,12 +377,7 @@ async function main() {
         const resultsPath = path.join(process.cwd(), 'evals/workflows/results.json');
         try {
             const database = loadResultsDatabase(resultsPath);
-            const updatedDatabase = updateResultsWithEvaluations(
-                database,
-                results,
-                argv.agentModel!,
-                argv.judgeModel!,
-            );
+            const updatedDatabase = updateResultsWithEvaluations(database, results, argv.agentModel!, argv.judgeModel!);
             saveResultsDatabase(resultsPath, updatedDatabase);
             console.log(`✅ Results saved to: ${resultsPath}`);
             console.log();
@@ -345,8 +388,8 @@ async function main() {
         }
     }
 
-    // Display results
-    console.log(formatResultsTable(results));
+    // Display results (with byte/token deltas when a baseline matched)
+    console.log(formatResultsTable(results, baselineByTestId.size > 0 ? baselineByTestId : undefined));
 
     // Exit with appropriate code - ALL tests must pass
     const totalTests = results.length;

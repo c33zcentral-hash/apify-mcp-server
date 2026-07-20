@@ -1,10 +1,10 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import type { ClientCapabilities } from '@modelcontextprotocol/sdk/types.js';
 import { expect } from 'vitest';
 
-import { HelperTools } from '../src/const.js';
+import { HELPER_TOOLS } from '../src/const.js';
 import type { TelemetryEnv, ToolCategory } from '../src/types.js';
 
 export type McpClientOptions = {
@@ -17,18 +17,35 @@ export type McpClientOptions = {
         enabled?: boolean; // Enable or disable telemetry (default: false for tests)
         env?: TelemetryEnv; // Telemetry environment (default: 'PROD', only used when telemetry.enabled is true)
     };
-    uiMode?: string; // Raw UI mode value passed as ?ui= URL param or --ui CLI arg (e.g. 'openai', 'true')
-    skyfireMode?: boolean; // Enable Skyfire mode (default: false)
-}
+    serverMode?: string; // Raw server-mode value passed as ?ui= URL param or --ui CLI arg (e.g. 'apps', 'true', or the deprecated 'openai')
+    payment?: string; // Payment provider identifier (e.g., 'x402', 'skyfire')
+    clientCapabilities?: ClientCapabilities; // Extra capabilities advertised by the client during initialize
+};
 
-function checkApifyToken(): void {
+/**
+ * Ensures `APIFY_TOKEN` is set unless the test runs in payment mode
+ * (where production also skips token requirements — see
+ * `apify-mcp-server-internal/src/server/shared.ts:authorizeRequestMiddleware`).
+ */
+function checkApifyToken(options?: McpClientOptions): void {
+    if (options?.payment) return;
     if (!process.env.APIFY_TOKEN) {
         throw new Error('APIFY_TOKEN environment variable is not set.');
     }
 }
 
+/**
+ * Returns the request headers a test client should send.
+ * In payment mode no `Authorization` header is sent — the server resolves
+ * the payment provider from the `?payment=` query param instead.
+ */
+function buildClientAuthHeaders(options?: McpClientOptions): Record<string, string> {
+    if (options?.payment) return {};
+    return { authorization: `Bearer ${process.env.APIFY_TOKEN}` };
+}
+
 function appendSearchParams(url: URL, options?: McpClientOptions): void {
-    const { actors, enableAddingActors, tools, telemetry, uiMode, skyfireMode } = options || {};
+    const { actors, enableAddingActors, tools, telemetry, serverMode, payment } = options || {};
     if (actors !== undefined) {
         url.searchParams.append('actors', actors.join(','));
     }
@@ -41,75 +58,38 @@ function appendSearchParams(url: URL, options?: McpClientOptions): void {
     // Append telemetry parameters (default to false for tests when not explicitly set)
     const telemetryEnabled = telemetry?.enabled !== undefined ? telemetry.enabled : false;
     url.searchParams.append('telemetry-enabled', telemetryEnabled.toString());
-    if (uiMode !== undefined) {
-        url.searchParams.append('ui', uiMode);
+    if (serverMode !== undefined) {
+        url.searchParams.append('ui', serverMode);
     }
-    if (skyfireMode) {
-        url.searchParams.append('payment', 'skyfire');
+    if (payment) {
+        url.searchParams.append('payment', payment);
     }
 }
 
-export async function createMcpSseClient(
-    serverUrl: string,
-    options?: McpClientOptions,
-): Promise<Client> {
-    checkApifyToken();
+export async function createMcpStreamableClient(serverUrl: string, options?: McpClientOptions): Promise<Client> {
+    checkApifyToken(options);
     const url = new URL(serverUrl);
     appendSearchParams(url, options);
 
-    const transport = new SSEClientTransport(
-        url,
-        {
-            requestInit: {
-                headers: {
-                    authorization: `Bearer ${process.env.APIFY_TOKEN}`,
-                },
-            },
+    const transport = new StreamableHTTPClientTransport(url, {
+        requestInit: {
+            headers: buildClientAuthHeaders(options),
         },
-    );
-
-    const client = new Client({
-        name: options?.clientName || 'sse-client',
-        version: '1.0.0',
     });
-    await client.connect(transport);
-
-    return client;
-}
-
-export async function createMcpStreamableClient(
-    serverUrl: string,
-    options?: McpClientOptions,
-): Promise<Client> {
-    checkApifyToken();
-    const url = new URL(serverUrl);
-    appendSearchParams(url, options);
-
-    const transport = new StreamableHTTPClientTransport(
-        url,
-        {
-            requestInit: {
-                headers: {
-                    authorization: `Bearer ${process.env.APIFY_TOKEN}`,
-                },
-            },
-        },
-    );
 
     const client = new Client({
         name: options?.clientName || 'streamable-http-client',
         version: '1.0.0',
     });
+    if (options?.clientCapabilities) client.registerCapabilities(options.clientCapabilities);
     await client.connect(transport);
 
     return client;
 }
 
-export async function createMcpStdioClient(
-    options?: McpClientOptions,
-): Promise<Client> {
-    checkApifyToken();
-    const { actors, enableAddingActors, tools, useEnv, telemetry, uiMode, skyfireMode } = options || {};
+export async function createMcpStdioClient(options?: McpClientOptions): Promise<Client> {
+    checkApifyToken(options);
+    const { actors, enableAddingActors, tools, useEnv, telemetry, serverMode, payment } = options || {};
     const args = ['dist/stdio.js'];
     const env: Record<string, string> = {
         APIFY_TOKEN: process.env.APIFY_TOKEN as string,
@@ -133,11 +113,11 @@ export async function createMcpStdioClient(
         if (telemetry?.env !== undefined) {
             env.TELEMETRY_ENV = telemetry.env;
         }
-        if (uiMode !== undefined) {
-            env.UI_MODE = uiMode;
+        if (serverMode !== undefined) {
+            env.UI_MODE = serverMode;
         }
-        if (skyfireMode !== undefined) {
-            env.SKYFIRE_MODE = skyfireMode.toString();
+        if (payment !== undefined) {
+            env.PAYMENT = payment;
         }
     } else {
         // Use command line arguments as before
@@ -154,11 +134,11 @@ export async function createMcpStdioClient(
         if (telemetry?.env !== undefined && telemetryEnabled) {
             args.push('--telemetry-env', telemetry.env);
         }
-        if (uiMode !== undefined) {
-            args.push('--ui', uiMode);
+        if (serverMode !== undefined) {
+            args.push('--ui', serverMode);
         }
-        if (skyfireMode !== undefined) {
-            args.push('--skyfire', skyfireMode.toString());
+        if (payment !== undefined) {
+            args.push('--payment', payment);
         }
     }
 
@@ -171,6 +151,7 @@ export async function createMcpStdioClient(
         name: options?.clientName || 'stdio-client',
         version: '1.0.0',
     });
+    if (options?.clientCapabilities) client.registerCapabilities(options.clientCapabilities);
     await client.connect(transport);
 
     return client;
@@ -183,7 +164,7 @@ export async function createMcpStdioClient(
  */
 export async function addActor(client: Client, actor: string): Promise<void> {
     await client.callTool({
-        name: HelperTools.ACTOR_ADD,
+        name: HELPER_TOOLS.ACTOR_ADD,
         arguments: {
             actor,
         },

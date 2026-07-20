@@ -4,7 +4,7 @@ import type { Express } from 'express';
 
 import log from '@apify/log';
 
-import { createExpressApp } from '../../src/actor/server.js';
+import { createExpressApp } from '../../src/dev_server.js';
 import { createMcpStreamableClient } from '../helpers.js';
 import { createIntegrationTestsSuite } from './suite.js';
 import { getAvailablePort } from './utils/port.js';
@@ -25,17 +25,20 @@ createIntegrationTestsSuite({
         // Get an available port
         httpServerPort = await getAvailablePort();
         httpServerHost = `http://localhost:${httpServerPort}`;
-        mcpUrl = `${httpServerHost}/mcp`;
+        mcpUrl = httpServerHost;
 
         // Create an express app
-        app = createExpressApp(httpServerHost);
+        app = createExpressApp();
 
         // Start a test server
         await new Promise<void>((resolve) => {
-            httpServer = app.listen(httpServerPort, () => resolve());
+            httpServer = app.listen(httpServerPort, '127.0.0.1', () => resolve());
         });
     },
     afterAllFn: async () => {
+        // closeAllConnections first — lingering long-poll requests (default waitSecs=30) keep
+        // the keep-alive sockets open and block server.close() past vitest's 10s hookTimeout.
+        httpServer.closeAllConnections?.();
         await new Promise<void>((resolve) => {
             httpServer.close(() => resolve());
         });

@@ -5,6 +5,20 @@ All pull requests are subject to automated and manual review against these guide
 
 ---
 
+## Branch naming
+
+The default branch is `master`. Feature branches must follow the `type/short-description` format, where `type` matches the conventional commit type:
+
+```text
+feat/add-dataset-tool
+fix/connection-timeout
+chore/update-dependencies
+refactor/tool-registry
+docs/update-readme
+```
+
+---
+
 ## Commit Messages and PR Titles
 
 All commits and PR titles must follow the **[Conventional Commits](https://www.conventionalcommits.org/)** format.
@@ -72,15 +86,71 @@ Use comments to guide reviewers:
     * **Classes, Types, Schemas, Components:** Use capitalized `PascalCase` format.
     * **Files & Folders:** Use lowercase `snake_case` format.
     * **Endpoint Paths:** Use lowercase `kebab-case` format.
-    * **Booleans:** Prefix with `is`, `has`, or `should` (e.g., `isValid`, `hasFinished`, `shouldRetry`).
+    * **Booleans:** Prefix with `is`, `has`, `can`, or `should` (e.g., `isValid`, `hasFinished`, `canRetry`, `shouldRetry`).
+    * **Function verbs:** Choose the verb based on what the function does:
+        * `get` — synchronous or cheap lookup from local state, cache, or in-memory data (e.g., `getToolFullName`, `getDefaultTools`).
+        * `fetch` — async retrieval from an external API or network call (e.g., `fetchActorDetails`, `fetchActorRunData`).
+        * `build` — construct and return a new object from inputs (e.g., `buildMCPResponse`, `buildActorInputSchema`).
+        * `create` — factory function that instantiates a class, service, or complex object (e.g., `createExpressApp`, `createProgressTracker`).
+        * `parse` — extract structured data from raw/untrusted input (e.g., `parseServerMode`, `parseInputParamsFromUrl`).
+        * `resolve` — determine a value from context, configuration, or multiple sources (e.g., `resolveOutputOptions`, `resolveServerMode`).
+        * `format` — convert data to a display or output representation (e.g., `formatActorToActorCard`, `formatActorForWidget`).
+        * `extract` — pull a specific piece of data from a larger structure (e.g., `extractActorId`, `extractActorName`).
+        * `validate` — check correctness and throw/return errors (e.g., `validateInput`).
+        * Avoid `make` and `compute` — use `build`/`create` and `get`/`resolve` respectively.
+    * **Type suffixes:** Use consistent suffixes for type names:
+        * `Options` — configuration passed to a function or constructor (e.g., `ActorsMcpServerOptions`, `SchemaGenerationOptions`).
+        * `Result` — return type of a function (e.g., `ActorDetailsResult`, `CallActorGetDatasetResult`).
+        * `Params` — input parameters grouped into an object (e.g., `ActorExecutionParams`, `ApifyRequestParams`).
+        * `Info` — read-only data describing an entity (e.g., `ActorInfo`, `PricingInfo`).
+        * `Context` — ambient state passed through a call chain (e.g., `ToolTelemetryContext`).
+        * `Config` — static configuration shape (e.g., `WidgetConfig`).
+        * Do not use `Type` or `Kind` suffixes.
+    * **Collections:** Name arrays as plurals (e.g., `actorTools`, `PRICING_TIERS`). Suffix Sets with `_SET` or use a descriptive plural (e.g., `CATEGORY_NAME_SET`, `SKYFIRE_ENABLED_TOOLS`). Name Maps and Records descriptively (e.g., `WIDGET_REGISTRY`, `LOG_LEVEL_MAP`).
     * **Units:** Suffix with the unit of measure (e.g., `externalCostUsd`, `intervalMillis`).
     * **Date/Time:** Suffix with `At` (e.g., `updateStartedAt`, `paidAt`).
     * **Zod Validators:** Suffix with `Validator`.
     * **Text/Copy:** Use the branded term `Actor` (capitalized) instead of `actor` in user-facing texts, labels, notifications, error messages, etc.
 
+*   **String formatting:**
+    * Use plain single-quoted strings for short one-liners.
+    * Use `dedent` (tagged template literal) for any string that would otherwise exceed `max-len` or span multiple lines — including tool `description` fields, LLM instructions, and single-sentence strings that are simply long.
+        * Inline `dedent` directly as a property or variable value — do not extract it to a named constant.
+        * For top-level string constants that are already flush-left, use a plain template literal — `dedent` only helps when indentation from surrounding code would otherwise be embedded in the string.
+        * `dedent` introduces `\n` at each source line break. This is fine for LLM-facing strings (tool descriptions, instructions, notes), but avoid it for strings where whitespace is significant or where `\n` would break rendering (e.g. UI labels, log messages, URLs).
+        * Do not interpolate values that start at column 0 (e.g. `JSON.stringify` output) inside `dedent` — `dedent` computes minimum indentation across all lines including interpolated ones, so a flush-left value sets `mindent = 0` and leaves all template lines with stray leading spaces. Use a `texts[]` array or plain template literal instead.
+        * For strings where `\n` is not acceptable, use string concatenation (`+`) to split across lines for `max-len` compliance.
+        ```typescript
+        import dedent from 'dedent';
+
+        // Multi-line prose — always use dedent
+        export const toolEntry = {
+            name: 'example-tool',
+            description: dedent`
+                Line 1.
+                Line 2.
+
+                USAGE:
+                - Example
+            `,
+        };
+
+        // Long single sentence going to LLM — dedent is fine, \n is ok
+        const note = isLimited ? dedent`
+            You only have a preview (${count} of ${total} items).
+            Do not present this as the full output.
+        ` : '';
+
+        // Long string where \n is NOT ok (e.g. log message) — use + instead
+        const msg = `Something failed for actor "${actorName}"`
+            + ` with status ${status}.`;
+        ```
+    * Avoid `[].join('\n')` for multiline strings — it is noisy and harder to edit.
+    * When migrating existing strings, keep the wording **semantically unchanged**.
+
 *   **Comments:**
     * Use proper English (spelling, grammar, punctuation, capitalization).
-    * Use JSDoc `/**` for documentation, `//` for generic comments, and avoid `/*` (single asterix multiline comments).
+    * Use JSDoc `/**` for documentation, `//` for generic comments, and avoid `/*` (single asterisk multiline comments).
 
 *   **Parameters**
     * **Minimal Parameters:** Pass only the parameters that the function actually uses.
@@ -191,6 +261,11 @@ Use comments to guide reviewers:
         * `warn` - suspicious but non-critical behavior
         * `info` - progress or important state changes
         * `debug` - local development
+    * **Mezmo (logDNA) promotion rule:** Mezmo automatically promotes log entries to error level when the log message or a data value contains the standalone word `"error"` (case-insensitive, e.g. the SDK send-path wrap `Failed to send response: Error: …`). `Error`/`ERROR` embedded in identifiers (`mcpErrorCode` key, `INTERNAL_ERROR`) has no word boundary and is safe. To avoid false error alerts in `softFail` calls:
+        * Use `errMessage` as the data key (not `error`) when logging an error message string.
+        * Sanitize the error message string with `sanitizeMezmoMessage()` from `src/utils/logging.ts` (replaces every whole-word `"error"` — any case — with `"failure"`).
+        * Avoid the word `"error"` in the `softFail` message string itself.
+        * Example: `log.softFail('Client disconnected', { errMessage: sanitizeMezmoMessage(err.message) })`
 
 *   **Sensitive Data:**
     * Never send sensitive information without proper permission checks.
@@ -203,7 +278,7 @@ Use comments to guide reviewers:
     * **Error responses**: Return user-friendly error messages with suggestions.
     * **Input validation**: Always validate tool inputs with Zod before processing.
     * **Caching**: Use TTL-based caching for Actor schemas and details (see `src/utils/ttl_lru.ts`).
-    * **Constants and tool names**: Always use constants and never hardcoded values. When referring to tools, ALWAYS use the `HelperTools` enum.
+    * **Constants and tool names**: Always use constants and never hardcoded values. When referring to tools, ALWAYS use the `HELPER_TOOLS` `as const` object.
         * Exception: Integration tests (`tests/integration/`) must use hardcoded strings for tool names. This ensures tests fail if a tool is renamed, preventing accidental breaking changes.
 
 *   **Anti-patterns:**
@@ -222,7 +297,7 @@ Use comments to guide reviewers:
 
 ## Design System Compliance (MANDATORY)
 
-**READ FIRST**: [DESIGN_SYSTEM_AGENT_INSTRUCTIONS.md](DESIGN_SYSTEM_AGENT_INSTRUCTIONS.md) — Complete design system rules.
+**READ FIRST**: [src/web/DESIGN_SYSTEM_AGENT_INSTRUCTIONS.md](src/web/DESIGN_SYSTEM_AGENT_INSTRUCTIONS.md) — Complete design system rules.
 
 **Quick Rules** (Zero tolerance):
 - ✅ ALWAYS use `theme.*` tokens (colors, spacing)

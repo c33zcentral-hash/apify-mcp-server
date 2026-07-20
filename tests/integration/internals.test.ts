@@ -5,12 +5,13 @@ import log from '@apify/log';
 
 import { ApifyClient } from '../../src/apify_client.js';
 import { ActorsMcpServer } from '../../src/index.js';
-import { addTool } from '../../src/tools/common/add_actor.js';
+import { actorNameToToolName } from '../../src/tools/actor_tool_naming.js';
+import { addActor } from '../../src/tools/actors/add_actor.js';
 import { getActorsAsTools } from '../../src/tools/index.js';
-import { actorNameToToolName } from '../../src/tools/utils.js';
 import type { Input } from '../../src/types.js';
+import { SERVER_MODE } from '../../src/types.js';
 import { loadToolsFromInput } from '../../src/utils/tools_loader.js';
-import { ACTOR_PYTHON_EXAMPLE } from '../const.js';
+import { ACTOR_NORMAL_MODE } from '../const.js';
 import { expectArrayWeakEquals } from '../helpers.js';
 
 beforeAll(() => {
@@ -19,24 +20,36 @@ beforeAll(() => {
 
 describe('MCP server internals integration tests', () => {
     it('should load and restore tools from a tool list', async () => {
-        const actorsMcpServer = new ActorsMcpServer({ setupSigintHandler: false, taskStore: new InMemoryTaskStore() });
+        const actorsMcpServer = new ActorsMcpServer({
+            setupSigintHandler: false,
+            taskStore: new InMemoryTaskStore(),
+            serverMode: SERVER_MODE.DEFAULT,
+        });
         const apifyClient = new ApifyClient({ token: process.env.APIFY_TOKEN });
-        const initialTools = await loadToolsFromInput({
-            enableAddingActors: true,
-        } as Input, apifyClient, 'default');
+        const initialTools = await loadToolsFromInput(
+            {
+                enableAddingActors: true,
+            } as Input,
+            apifyClient,
+            'default',
+        );
         actorsMcpServer.upsertTools(initialTools);
 
         // Load new tool
-        const newTool = await getActorsAsTools([ACTOR_PYTHON_EXAMPLE], apifyClient);
+        const { tools: newTool } = await getActorsAsTools([ACTOR_NORMAL_MODE], apifyClient);
         actorsMcpServer.upsertTools(newTool);
 
         // Store the tool name list
         const names = actorsMcpServer.listAllToolNames();
-        // With enableAddingActors=true and no tools/actors, we should only have add-actor initially
+        // enableAddingActors=true seeds add-actor + 4 auto-injected helpers (get-actor-run, dataset, kv, abort);
+        // then ACTOR_NORMAL_MODE is added on top.
         const expectedToolNames = [
-            addTool.name,
-            ACTOR_PYTHON_EXAMPLE,
-            'get-actor-output',
+            addActor.name,
+            'get-actor-run',
+            'get-dataset-items',
+            'get-key-value-store-record',
+            'abort-actor-run',
+            ACTOR_NORMAL_MODE,
         ];
         expectArrayWeakEquals(expectedToolNames, names);
 
@@ -53,8 +66,8 @@ describe('MCP server internals integration tests', () => {
 
     it('should notify tools changed handler on tool modifications', async () => {
         let latestTools: string[] = [];
-        // With enableAddingActors=true and no tools/actors, seeded set contains only add-actor
-        const numberOfTools = 2;
+        // enableAddingActors=true seeds add-actor + 4 auto-injected helpers (get-actor-run, dataset, kv, abort)
+        const numberOfTools = 5;
 
         let toolNotificationCount = 0;
         const onToolsChanged = (tools: string[]) => {
@@ -62,22 +75,26 @@ describe('MCP server internals integration tests', () => {
             toolNotificationCount++;
         };
 
-        const actorsMCPServer = new ActorsMcpServer({ setupSigintHandler: false, taskStore: new InMemoryTaskStore() });
+        const actorsMCPServer = new ActorsMcpServer({
+            setupSigintHandler: false,
+            taskStore: new InMemoryTaskStore(),
+            serverMode: SERVER_MODE.DEFAULT,
+        });
         const apifyClient = new ApifyClient({ token: process.env.APIFY_TOKEN });
         const seeded = await loadToolsFromInput({ enableAddingActors: true } as Input, apifyClient, 'default');
         actorsMCPServer.upsertTools(seeded);
         actorsMCPServer.registerToolsChangedHandler(onToolsChanged);
 
         // Add a new Actor
-        const actor = ACTOR_PYTHON_EXAMPLE;
-        const newTool = await getActorsAsTools([actor], apifyClient);
+        const actor = ACTOR_NORMAL_MODE;
+        const { tools: newTool } = await getActorsAsTools([actor], apifyClient);
         actorsMCPServer.upsertTools(newTool, true);
 
         // Check if the notification was received with the correct tools
         expect(toolNotificationCount).toBe(1);
         expect(latestTools.length).toBe(numberOfTools + 1);
         expect(latestTools).toContain(actor);
-        expect(latestTools).toContain(addTool.name);
+        expect(latestTools).toContain(addActor.name);
         // No default actors are present when only add-actor is enabled by default
 
         // Remove the Actor
@@ -87,28 +104,33 @@ describe('MCP server internals integration tests', () => {
         expect(toolNotificationCount).toBe(2);
         expect(latestTools.length).toBe(numberOfTools);
         expect(latestTools).not.toContain(actor);
-        expect(latestTools).toContain(addTool.name);
+        expect(latestTools).toContain(addActor.name);
         // No default actors are present by default in this mode
     });
 
     it('should stop notifying after unregistering tools changed handler', async () => {
         let latestTools: string[] = [];
         let notificationCount = 0;
-        const numberOfTools = 2;
+        // enableAddingActors=true seeds add-actor + 4 auto-injected helpers (get-actor-run, dataset, kv, abort)
+        const numberOfTools = 5;
         const onToolsChanged = (tools: string[]) => {
             latestTools = tools;
             notificationCount++;
         };
 
-        const actorsMCPServer = new ActorsMcpServer({ setupSigintHandler: false, taskStore: new InMemoryTaskStore() });
+        const actorsMCPServer = new ActorsMcpServer({
+            setupSigintHandler: false,
+            taskStore: new InMemoryTaskStore(),
+            serverMode: SERVER_MODE.DEFAULT,
+        });
         const apifyClient = new ApifyClient({ token: process.env.APIFY_TOKEN });
         const seeded = await loadToolsFromInput({ enableAddingActors: true } as Input, apifyClient, 'default');
         actorsMCPServer.upsertTools(seeded);
         actorsMCPServer.registerToolsChangedHandler(onToolsChanged);
 
         // Add a new Actor
-        const actor = ACTOR_PYTHON_EXAMPLE;
-        const newTool = await getActorsAsTools([actor], apifyClient);
+        const actor = ACTOR_NORMAL_MODE;
+        const { tools: newTool } = await getActorsAsTools([actor], apifyClient);
         actorsMCPServer.upsertTools(newTool, true);
 
         // Check if the notification was received

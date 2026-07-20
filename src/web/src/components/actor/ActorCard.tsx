@@ -1,11 +1,13 @@
-import React from "react";
-import styled from "styled-components";
+import React from 'react';
+import styled from 'styled-components';
 
-import { Actor } from "../../types";
-import { Text, Box, ActorAvatar, theme, clampLines, Link } from "@apify/ui-library";
-import { PeopleIcon, CoinIcon, StarEmptyIcon, ExternalLinkIcon } from "@apify/ui-icons";
-import { formatNumber, formatDecimalNumber, formatPricing } from "../../utils/formatting";
-import { ActorStats, StructuredPricingInfo } from "../../types";
+import { PeopleIcon, CoinIcon, StarEmptyIcon, ExternalLinkIcon } from '@apify/ui-icons';
+import { Text, Box, ActorAvatar, theme, clampLines } from '@apify/ui-library';
+
+import { useMcpApp } from '../../context/mcp-app-context';
+import type { Actor } from '../../types';
+import type { ActorStats, StructuredPricingInfo } from '../../types';
+import { formatNumber, formatDecimalNumber, formatPricing } from '../../utils/formatting';
 
 interface ActorCardProps {
     actor: Actor;
@@ -19,7 +21,7 @@ const Container = styled(Box)<{ $withBorder: boolean }>`
     flex-direction: column;
     gap: ${theme.space.space8};
     border-radius: ${theme.radius.radius12};
-    border: ${props => props.$withBorder ? `1px solid ${theme.color.neutral.separatorSubtle}` : 'none'};
+    border: ${(props) => (props.$withBorder ? `1px solid ${theme.color.neutral.separatorSubtle}` : 'none')};
 
     .clampToOneLine {
         ${clampLines(1)}
@@ -50,19 +52,20 @@ const BoxGroup = styled(Box)`
     align-items: center;
 `;
 
-const ExternalLinkButton = styled(Link)`
+const ExternalLinkButton = styled.button`
     display: inline-flex;
     align-items: center;
     justify-content: center;
     box-sizing: border-box;
     width: 32px;
     height: 32px;
+    padding: 0;
     border-radius: ${theme.radius.radius6};
     background-color: ${theme.color.neutral.backgroundMuted};
     border: 1px solid ${theme.color.neutral.border};
     color: ${theme.color.neutral.text};
     flex-shrink: 0;
-    text-decoration: none;
+    cursor: pointer;
 
     &:hover {
         background-color: ${theme.color.neutral.hover};
@@ -79,9 +82,9 @@ const StyledSeparator = styled(Box)`
     width: 1px;
 `;
 
-const DescriptionText = styled(Text)<{ isDetail: boolean }>`
+const DescriptionText = styled(Text)<{ $isDetail: boolean }>`
     white-space: pre-wrap;
-    ${({ isDetail }) => !isDetail && clampLines(1)};
+    ${({ $isDetail }) => !$isDetail && clampLines(1)};
 `;
 
 const ActorHeader = styled.div`
@@ -104,32 +107,33 @@ const ActorAvatarWrapper = styled.div`
 `;
 
 type StatProps = {
-    icon: React.JSX.Element
-    value: string
-    additionalInfo?: string
-}
+    icon: React.JSX.Element;
+    value: string;
+    additionalInfo?: string;
+};
 
 const Stat: React.FC<StatProps> = ({ icon, value, additionalInfo }) => {
     return (
         <BoxGroup>
             {icon}
-            <Text
-                size="small"
-                weight="medium"
-                color={theme.color.neutral.textMuted}
-            >
+            <Text size="small" weight="medium" color={theme.color.neutral.textMuted}>
                 {value}
-                {additionalInfo && <Text size="small" color={theme.color.neutral.textSubtle} as="span"> {additionalInfo}</Text>}
+                {additionalInfo && (
+                    <Text size="small" color={theme.color.neutral.textSubtle} as="span">
+                        {' '}
+                        {additionalInfo}
+                    </Text>
+                )}
             </Text>
         </BoxGroup>
-    )
-}
+    );
+};
 
 type StatsRowProps = {
-    stats?: ActorStats
-    pricingInfo?: StructuredPricingInfo
+    stats?: ActorStats;
+    pricingInfo?: StructuredPricingInfo;
     showFirstSeparator?: boolean;
-}
+};
 
 const StatsContainer = styled(Box)`
     display: flex;
@@ -156,46 +160,52 @@ const ShowOnTabletAndDesktop = styled(BoxRow)`
 `;
 
 const StatsRow: React.FC<StatsRowProps> = ({ stats, pricingInfo, showFirstSeparator = false }) => {
-    const {totalUsers, actorReviewCount, actorReviewRating} = stats || {}
+    const { totalUsers, actorReviewCount, actorReviewRating } = stats || {};
     const pricing = pricingInfo ? formatPricing(pricingInfo) : 'N/A';
 
     return (
         <StatsContainer>
-            {totalUsers !== undefined && <>
-                {showFirstSeparator && <StyledSeparator />}
-                <Stat
-                    icon={<PeopleIcon size="12" color={theme.color.neutral.icon} />}
-                    value={formatNumber(totalUsers)}
-                />
-            </>}
-            {actorReviewCount !== undefined && actorReviewRating !== undefined && <>
-                <StyledSeparator />
-                <Stat
-                    icon={<StarEmptyIcon size="12" color={theme.color.neutral.icon} />}
-                    value={formatDecimalNumber(actorReviewRating)}
-                    additionalInfo={`(${formatNumber(actorReviewCount)})`}
-                />
-            </>}
-            {pricingInfo && <>
-                <StyledSeparator />
-                <Stat
-                    icon={<CoinIcon size="12" color={theme.color.neutral.icon} />}
-                    value={pricing}
-                />
-            </>}
+            {totalUsers !== undefined && (
+                <>
+                    {showFirstSeparator && <StyledSeparator />}
+                    <Stat
+                        icon={<PeopleIcon size="12" color={theme.color.neutral.icon} />}
+                        value={formatNumber(totalUsers)}
+                    />
+                </>
+            )}
+            {actorReviewCount !== undefined && actorReviewRating !== undefined && (
+                <>
+                    <StyledSeparator />
+                    <Stat
+                        icon={<StarEmptyIcon size="12" color={theme.color.neutral.icon} />}
+                        value={formatDecimalNumber(actorReviewRating)}
+                        additionalInfo={`(${formatNumber(actorReviewCount)})`}
+                    />
+                </>
+            )}
+            {pricingInfo && (
+                <>
+                    <StyledSeparator />
+                    <Stat icon={<CoinIcon size="12" color={theme.color.neutral.icon} />} value={pricing} />
+                </>
+            )}
         </StatsContainer>
     );
-}
+};
 
-export const ActorCard: React.FC<ActorCardProps> = ({
-    actor,
-    isDetail = false,
-    customActionButton,
-}) => {
+export const ActorCard: React.FC<ActorCardProps> = ({ actor, isDetail = false, customActionButton }) => {
+    const { app } = useMcpApp();
     const statsProps = {
         stats: actor.stats,
         pricingInfo: actor.currentPricingInfo,
-        isDetail
+        isDetail,
+    };
+
+    const handleOpenActor = () => {
+        if (app) {
+            app.openLink({ url: actor.url });
+        }
     };
 
     return (
@@ -207,7 +217,9 @@ export const ActorCard: React.FC<ActorCardProps> = ({
                             <ActorAvatar size={40} name={actor.title} url={actor.pictureUrl} />
                         </ActorAvatarWrapper>
                         <ActorTitleWrapper>
-                            <Text as="h3" weight="bold" color={theme.color.neutral.text} className="clampToOneLine" >{actor.title}</Text>
+                            <Text as="h3" weight="bold" color={theme.color.neutral.text} className="clampToOneLine">
+                                {actor.title}
+                            </Text>
                             <BoxRow>
                                 <Text
                                     size="small"
@@ -218,27 +230,32 @@ export const ActorCard: React.FC<ActorCardProps> = ({
                                 >
                                     {actor.username}/{actor.name}
                                 </Text>
-                                {actor.stats && !isDetail && <ShowOnTabletAndDesktop><StatsRow {...statsProps} showFirstSeparator /></ShowOnTabletAndDesktop>}
+                                {actor.stats && !isDetail && (
+                                    <ShowOnTabletAndDesktop>
+                                        <StatsRow {...statsProps} showFirstSeparator />
+                                    </ShowOnTabletAndDesktop>
+                                )}
                             </BoxRow>
                         </ActorTitleWrapper>
                     </ActorHeader>
                     {customActionButton || (
-                        <ExternalLinkButton to={actor.url} hideExternalIcon className="flexShrink0"><ExternalLinkIcon size="16" /></ExternalLinkButton>
+                        <ExternalLinkButton type="button" onClick={handleOpenActor} className="flexShrink0">
+                            <ExternalLinkIcon size="16" />
+                        </ExternalLinkButton>
                     )}
                 </ActorHeaderWithActionButton>
             </BoxRow>
 
-            <DescriptionText
-                size="small"
-                weight="normal"
-                color={theme.color.neutral.text}
-                isDetail={isDetail}
-            >
+            <DescriptionText size="small" weight="normal" color={theme.color.neutral.text} $isDetail={isDetail}>
                 {actor.description}
             </DescriptionText>
 
             {actor.stats && isDetail && <StatsRow {...statsProps} />}
-            {actor.stats && !isDetail && <ShowOnMobile><StatsRow {...statsProps} /></ShowOnMobile>}
+            {actor.stats && !isDetail && (
+                <ShowOnMobile>
+                    <StatsRow {...statsProps} />
+                </ShowOnMobile>
+            )}
         </Container>
     );
 };

@@ -14,7 +14,7 @@ import { hideBin } from 'yargs/helpers';
 
 import log from '@apify/log';
 
-import { sanitizeHeaderValue, validatePhoenixEnvVars } from './config.js';
+import { sanitizeEnvValue, sanitizeProcessEnv, validatePhoenixEnvVars } from './config.js';
 import { loadTestCases, filterByCategory, filterById, type TestCase } from './evaluation_utils.js';
 
 // Set log level to debug
@@ -32,6 +32,7 @@ type CliArgs = {
 
 // Load environment variables from .env file if present
 dotenv.config({ path: '.env' });
+sanitizeProcessEnv();
 
 // Parse command line arguments using yargs
 const argv = yargs(hideBin(process.argv))
@@ -41,8 +42,8 @@ const argv = yargs(hideBin(process.argv))
     .option('test-cases', {
         type: 'string',
         describe: 'Path to test cases JSON file',
-        default: 'test-cases.json',
-        example: 'custom-test-cases.json',
+        default: 'test_cases.json',
+        example: 'custom_test_cases.json',
     })
     .option('category', {
         type: 'string',
@@ -72,12 +73,7 @@ const argv = yargs(hideBin(process.argv))
     .epilogue('  $0 --test-cases custom.json --category search-actors')
     .parseSync() as CliArgs;
 
-
-async function createDatasetFromTestCases(
-    testCases: TestCase[],
-    datasetName: string,
-    version: string,
-): Promise<void> {
+async function createDatasetFromTestCases(testCases: TestCase[], datasetName: string, version: string): Promise<void> {
     log.info('Creating Phoenix dataset from test cases...');
 
     // Validate environment variables
@@ -98,7 +94,7 @@ async function createDatasetFromTestCases(
     const client = createClient({
         options: {
             baseUrl: process.env.PHOENIX_BASE_URL!,
-            headers: { Authorization: `Bearer ${sanitizeHeaderValue(process.env.PHOENIX_API_KEY)}` },
+            headers: { Authorization: `Bearer ${sanitizeEnvValue(process.env.PHOENIX_API_KEY)}` },
         },
     });
 
@@ -120,7 +116,7 @@ async function createDatasetFromTestCases(
             log.error('💡 Solutions:');
             log.error('  1. Use --dataset-name to specify a different name:');
             log.error(`     tsx create-dataset.ts --dataset-name ${datasetName}_v2`);
-            log.error(`     npm run evals:create-dataset -- --dataset-name ${datasetName}_v2`);
+            log.error(`     pnpm run evals:create-dataset -- --dataset-name ${datasetName}_v2`);
             log.error('  2. Delete the existing dataset from Phoenix dashboard first');
             log.error('');
             log.error(`📋 Technical details: ${error.message}`);
@@ -136,7 +132,7 @@ async function main(): Promise<void> {
     try {
         // Load test cases from specified file
 
-        const testData = loadTestCases(argv.testCases || 'test-cases.json');
+        const testData = loadTestCases(argv.testCases || 'test_cases.json');
         let { testCases } = testData;
 
         // Apply category filter if specified

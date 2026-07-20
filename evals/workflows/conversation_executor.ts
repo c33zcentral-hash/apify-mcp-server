@@ -10,7 +10,7 @@ import { mcpToolsToOpenAiTools } from '../shared/openai_tools.js';
 import { AGENT_SYSTEM_PROMPT, MAX_CONVERSATION_TURNS, MODELS } from './config.js';
 import type { LlmClient } from './llm_client.js';
 import type { McpClient } from './mcp_client.js';
-import type { ConversationHistory, ConversationTurn } from './types.js';
+import type { ConversationHistory, ConversationTurn, McpToolResult } from './types.js';
 
 export type ConversationExecutorOptions = {
     /** User's initial prompt */
@@ -25,15 +25,13 @@ export type ConversationExecutorOptions = {
     model?: string;
     /** Additional instructions from MCP server (optional) */
     serverInstructions?: string | null;
-}
+};
 
 /**
  * Execute a multi-turn conversation with tool calling
  * Tools are fetched dynamically from MCP after each turn
  */
-export async function executeConversation(
-    options: ConversationExecutorOptions,
-): Promise<ConversationHistory> {
+export async function executeConversation(options: ConversationExecutorOptions): Promise<ConversationHistory> {
     const {
         userPrompt,
         mcpClient,
@@ -58,6 +56,11 @@ export async function executeConversation(
 
     let turnNumber = 0;
     let completed = false;
+    let promptTokens = 0;
+    let completionTokens = 0;
+    // Track whether the provider ever reported usage; if it never does, totals stay undefined
+    // rather than a fabricated 0 that reads as a real measurement.
+    let hasUsage = false;
 
     // Fetch tools initially
     let tools: ChatCompletionTool[] = mcpToolsToOpenAiTools(mcpClient.getTools());
@@ -67,6 +70,13 @@ export async function executeConversation(
 
         // Call LLM with current conversation state and current tools
         const llmResponse = await llmClient.callLlm(messages, model, tools);
+
+        // Accumulate token usage across the agent loop (cost grows with tool-result size)
+        if (llmResponse.usage) {
+            hasUsage = true;
+            promptTokens += llmResponse.usage.promptTokens;
+            completionTokens += llmResponse.usage.completionTokens;
+        }
 
         // Check if LLM wants to call tools
         if (!llmResponse.toolCalls || llmResponse.toolCalls.length === 0) {
@@ -113,10 +123,12 @@ export async function executeConversation(
                 args = JSON.parse(toolCall.arguments);
             } catch (error) {
                 // Invalid JSON arguments
-                const errorResult = {
+                const errorContent = JSON.stringify({ error: `Failed to parse arguments: ${error}` });
+                const errorResult: McpToolResult = {
                     toolName: toolCall.name,
                     success: false,
                     error: `Failed to parse arguments: ${error}`,
+                    resultBytes: Buffer.byteLength(errorContent, 'utf8'),
                 };
                 turn.toolResults.push(errorResult);
 
@@ -124,7 +136,7 @@ export async function executeConversation(
                 messages.push({
                     role: 'tool',
                     tool_call_id: toolCall.id,
-                    content: JSON.stringify({ error: errorResult.error }),
+                    content: errorContent,
                 });
                 continue;
             }
@@ -135,22 +147,19 @@ export async function executeConversation(
                 arguments: args,
             });
 
+            // Serialize the tool result exactly as the agent (LLM) receives it,
+            // and record its byte size to measure the data volume tools return.
+            const content = result.success ? JSON.stringify(result.result) : JSON.stringify({ error: result.error });
+            result.resultBytes = Buffer.byteLength(content, 'utf8');
+
             turn.toolResults.push(result);
 
             // Add tool result to conversation
-            if (result.success) {
-                messages.push({
-                    role: 'tool',
-                    tool_call_id: toolCall.id,
-                    content: JSON.stringify(result.result),
-                });
-            } else {
-                messages.push({
-                    role: 'tool',
-                    tool_call_id: toolCall.id,
-                    content: JSON.stringify({ error: result.error }),
-                });
-            }
+            messages.push({
+                role: 'tool',
+                tool_call_id: toolCall.id,
+                content,
+            });
         }
 
         turns.push(turn);
@@ -167,5 +176,8 @@ export async function executeConversation(
         completed,
         hitMaxTurns: turnNumber >= maxTurns && !completed,
         totalTurns: turnNumber,
+        promptTokens: hasUsage ? promptTokens : undefined,
+        completionTokens: hasUsage ? completionTokens : undefined,
+        totalTokens: hasUsage ? promptTokens + completionTokens : undefined,
     };
 }

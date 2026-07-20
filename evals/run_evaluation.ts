@@ -17,11 +17,6 @@ import { hideBin } from 'yargs/helpers';
 import log from '@apify/log';
 
 import {
-    loadTools,
-    createOpenRouterTask,
-    createToolSelectionLLMEvaluator
-} from './evaluation_utils.js';
-import {
     DATASET_NAME,
     MODELS_TO_EVALUATE,
     PASS_THRESHOLD,
@@ -29,9 +24,11 @@ import {
     PHOENIX_RETRY_DELAY_MS,
     PHOENIX_MAX_RETRIES,
     type EvaluatorName,
-    sanitizeHeaderValue,
-    validatePhoenixEnvVars
+    sanitizeEnvValue,
+    sanitizeProcessEnv,
+    validatePhoenixEnvVars,
 } from './config.js';
+import { loadTools, createOpenRouterTask, createToolSelectionLLMEvaluator } from './evaluation_utils.js';
 
 type EvaluatorResult = {
     model: string;
@@ -58,6 +55,7 @@ const RUN_LLM_EVALUATOR = true;
 const RUN_TOOLS_EXACT_MATCH_EVALUATOR = true;
 
 dotenv.config({ path: '.env' });
+sanitizeProcessEnv();
 
 // Parse command line arguments using yargs
 const argv = yargs(hideBin(process.argv))
@@ -75,11 +73,8 @@ const argv = yargs(hideBin(process.argv))
     .epilogue('Examples:')
     .epilogue('  $0                                    # Use default dataset from config')
     .epilogue('  $0 --dataset-name tmp-1               # Evaluate custom dataset')
-    .epilogue('  npm run evals:run -- --dataset-name custom_v1  # Via npm script')
+    .epilogue('  pnpm run evals:run -- --dataset-name custom_v1  # Via pnpm script')
     .parseSync() as CliArgs;
-
-// Sanitize secrets early to avoid invalid header characters in CI
-process.env.OPENROUTER_API_KEY = sanitizeHeaderValue(process.env.OPENROUTER_API_KEY);
 
 // Tools match evaluator: returns score 1 if expected tool_calls match output list, 0 otherwise
 const toolsExactMatch = asEvaluator({
@@ -111,13 +106,9 @@ const toolsExactMatch = asEvaluator({
         };
 
         // Normalize expected tools
-        const normalizedExpectedTools = [...expectedTools]
-            .map(normalizeToolName)
-            .sort();
+        const normalizedExpectedTools = [...expectedTools].map(normalizeToolName).sort();
 
-        const outputToolsTmp = (output?.tool_calls || [])
-            .map(normalizeToolCall)
-            .sort();
+        const outputToolsTmp = (output?.tool_calls || []).map(normalizeToolCall).sort();
 
         const outputToolsSet = Array.from(new Set(outputToolsTmp)).sort();
         // it is correct if outputTools includes multiple calls to the same tool
@@ -125,7 +116,9 @@ const toolsExactMatch = asEvaluator({
         const score = isCorrect ? 1.0 : 0.0;
         const explanation = `Expected: ${JSON.stringify(normalizedExpectedTools)}, Got: ${JSON.stringify(outputToolsSet)}`;
 
-        log.debug(`🤖 Tools exact match: score=${score}, output=${JSON.stringify(outputToolsSet)}, expected=${JSON.stringify(normalizedExpectedTools)}`);
+        log.debug(
+            `🤖 Tools exact match: score=${score}, output=${JSON.stringify(outputToolsSet)}, expected=${JSON.stringify(normalizedExpectedTools)}`,
+        );
 
         return {
             score,
@@ -134,12 +127,11 @@ const toolsExactMatch = asEvaluator({
     },
 });
 
-
 function processEvaluatorResult(
     experiment: any,
     modelName: string,
     experimentName: string,
-    evaluatorName: EvaluatorName
+    evaluatorName: EvaluatorName,
 ): EvaluatorResult {
     const runsMap = experiment.runs ?? {};
     const evalRuns = experiment.evaluationRuns ?? [];
@@ -161,7 +153,6 @@ function processEvaluatorResult(
     };
 }
 
-
 function printResults(results: EvaluatorResult[]): void {
     log.info('📊 Results:');
     for (const result of results) {
@@ -175,7 +166,7 @@ function printResults(results: EvaluatorResult[]): void {
     }
 
     log.info(`\nPass threshold: ${(PASS_THRESHOLD * 100).toFixed(1)}%`);
-    const allPassed = results.every(r => !r.error && r.passed);
+    const allPassed = results.every((r) => !r.error && r.passed);
     if (allPassed) {
         log.info('All tests passed');
     } else {
@@ -197,7 +188,7 @@ async function main(datasetName: string): Promise<number> {
     const client = createClient({
         options: {
             baseUrl: process.env.PHOENIX_BASE_URL!,
-            headers: { Authorization: `Bearer ${sanitizeHeaderValue(process.env.PHOENIX_API_KEY)}` },
+            headers: { Authorization: `Bearer ${sanitizeEnvValue(process.env.PHOENIX_API_KEY)}` },
         },
     });
 
@@ -266,14 +257,20 @@ async function main(datasetName: string): Promise<number> {
                 log.info(`Experiment run completed`);
 
                 // Process each evaluator separately
-                results.push(processEvaluatorResult(experiment, modelName, experimentName, EVALUATOR_NAMES.TOOLS_EXACT_MATCH));
-                results.push(processEvaluatorResult(experiment, modelName, experimentName, EVALUATOR_NAMES.TOOL_SELECTION_LLM));
+                results.push(
+                    processEvaluatorResult(experiment, modelName, experimentName, EVALUATOR_NAMES.TOOLS_EXACT_MATCH),
+                );
+                results.push(
+                    processEvaluatorResult(experiment, modelName, experimentName, EVALUATOR_NAMES.TOOL_SELECTION_LLM),
+                );
                 experimentSucceeded = true;
                 break;
             } catch (e: unknown) {
                 const err = e instanceof Error ? e : new Error(String(e));
                 if (attempt < PHOENIX_MAX_RETRIES) {
-                    log.warning(`Error evaluating ${modelName} (attempt ${attempt}/${PHOENIX_MAX_RETRIES}): ${err.message}`);
+                    log.warning(
+                        `Error evaluating ${modelName} (attempt ${attempt}/${PHOENIX_MAX_RETRIES}): ${err.message}`,
+                    );
                     await new Promise((resolve) => setTimeout(resolve, attempt * PHOENIX_RETRY_DELAY_MS));
                 } else {
                     log.error(`Error evaluating ${modelName} after ${PHOENIX_MAX_RETRIES} attempts:`, err);
@@ -284,7 +281,7 @@ async function main(datasetName: string): Promise<number> {
 
         if (!experimentSucceeded) {
             // Add error results for both evaluators
-            Object.values(EVALUATOR_NAMES).forEach(evaluatorName => {
+            Object.values(EVALUATOR_NAMES).forEach((evaluatorName) => {
                 results.push({
                     model: modelName,
                     experimentName,
@@ -294,7 +291,7 @@ async function main(datasetName: string): Promise<number> {
                     correct: 0,
                     total: 0,
                     passed: false,
-                    error: `Failed after ${PHOENIX_MAX_RETRIES} attempts`
+                    error: `Failed after ${PHOENIX_MAX_RETRIES} attempts`,
                 });
             });
         }
@@ -302,7 +299,7 @@ async function main(datasetName: string): Promise<number> {
 
     printResults(results);
 
-    const allPassed = results.every(r => !r.error && r.passed);
+    const allPassed = results.every((r) => !r.error && r.passed);
     return allPassed ? 0 : 1;
 }
 

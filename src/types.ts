@@ -10,15 +10,16 @@ import type {
     ActorRunPricingInfo,
     ActorStats,
     ActorStoreList as ActorStoreListOutdated,
-    PricePerEventActorPricingInfo as PricePerEventActorPricingInfoOutdated,
 } from 'apify-client';
 import type z from 'zod';
 
 import type { ApifyClient } from './apify_client.js';
-import type { ACTOR_PRICING_MODEL, TELEMETRY_ENV, TOOL_STATUS } from './const.js';
+import type { FAILURE_CATEGORY, TELEMETRY_ENV, TOOL_STATUS } from './const.js';
 import type { ActorsMcpServer } from './mcp/server.js';
-import type { CATEGORY_NAMES } from './tools/categories.js';
-import type { StructuredPricingInfo } from './utils/pricing_info.js';
+import type { PaymentProvider } from './payments/types.js';
+import type { CATEGORY_NAMES } from './tools/registry.js';
+import type { ToolResponse } from './utils/mcp.js';
+import type { PricingTier, StructuredPricingInfo } from './utils/pricing_info.js';
 import type { ProgressTracker } from './utils/progress.js';
 
 export type SchemaProperties = {
@@ -66,8 +67,10 @@ export type ActorDefinitionWithDesc = Omit<ActorDefinition, 'input'> & {
  * Pruned Actor definition type.
  * The `id` property is set to Actor ID.
  */
-export type ActorDefinitionPruned = Pick<ActorDefinitionWithDesc,
-    'id' | 'actorFullName' | 'buildTag' | 'readme' | 'readmeSummary' | 'input' | 'description' | 'defaultRunOptions'> & {
+export type ActorDefinitionPruned = Pick<
+    ActorDefinitionWithDesc,
+    'id' | 'actorFullName' | 'buildTag' | 'readme' | 'readmeSummary' | 'input' | 'description' | 'defaultRunOptions'
+> & {
     webServerMcpPath?: string; // Optional, used for Actorized MCP server tools
     pictureUrl?: string; // Optional, URL to the Actor's icon/picture
 };
@@ -89,8 +92,8 @@ export type ActorDefinitionWithInfo = {
 export type ToolBase = z.infer<typeof ToolSchema> & {
     /** AJV validation function for the input schema */
     ajvValidate: ValidateFunction;
-    /** Whether this tool requires Skyfire pay ID validation (uses Apify API) */
-    requiresSkyfirePayId?: boolean;
+    /** Whether this tool requires payment validation before execution */
+    paymentRequired?: boolean;
 };
 
 /**
@@ -102,16 +105,40 @@ export type ToolBase = z.infer<typeof ToolSchema> & {
 export type ToolInputSchema = z.infer<typeof ToolSchema>['inputSchema'];
 
 /**
+ * Tool type discriminator values.
+ * Use these constants instead of string literals for better type safety and maintainability.
+ */
+export const TOOL_TYPE = {
+    INTERNAL: 'internal',
+    ACTOR: 'actor',
+    ACTOR_MCP: 'actor-mcp',
+} as const;
+
+/**
+ * Union of all tool type discriminator values.
+ */
+export type TOOL_TYPE = (typeof TOOL_TYPE)[keyof typeof TOOL_TYPE];
+
+/**
  * Type for Actor-based tools - tools that wrap Apify Actors.
- * Type discriminator: 'actor'
+ * Type discriminator: {@link TOOL_TYPE.ACTOR}
  */
 export type ActorTool = ToolBase & {
     /** Type discriminator for actor tools */
-    type: 'actor';
+    type: typeof TOOL_TYPE.ACTOR;
+    /** Stable Apify Actor ID (e.g. "JxcaGGqy7TwBdHxMz") — does not change on rename */
+    actorId: string;
     /** Full name of the Apify Actor (username/name) */
     actorFullName: string;
     /** Optional memory limit in MB for the Actor execution */
     memoryMbytes?: number;
+    /**
+     * Per-Actor dataset row properties (e.g. `{ url: { type: 'string' } }`) from the actorStore.
+     * Stashed at tools/list time and injected by the executor into
+     * `structuredContent.storages.datasets.default.itemsSchema` so the declared outputSchema
+     * matches the response. Stripped before the public tools/list wire output.
+     */
+    datasetItemsSchema?: Record<string, unknown>;
 };
 
 /**
@@ -119,8 +146,10 @@ export type ActorTool = ToolBase & {
  * Contains both the tool arguments and server references.
  */
 export type InternalToolArgs = {
-    /** Arguments passed to the tool */
+    /** Arguments passed to the tool (payment fields already stripped by the server) */
     args: Record<string, unknown>;
+    /** MCP request `_meta` field — used by payment providers that read from metadata (e.g., x402) */
+    meta?: Record<string, unknown>;
     /** Extra data given to request handlers.
      *
      * Can be used to send notifications from the server to the client.
@@ -134,36 +163,38 @@ export type InternalToolArgs = {
     mcpServer: Server;
     /** Apify API token */
     apifyToken: string;
-    /** List of Actor IDs that the user has rented */
-    userRentedActorIds?: string[];
+    /** ApifyClient pre-configured with payment headers (if applicable) or standard token. */
+    apifyClient: ApifyClient;
     /** Optional progress tracker for long running internal tools, like call-actor */
     progressTracker?: ProgressTracker | null;
     /** MCP session ID for logging context */
     mcpSessionId?: string;
+    /** True when the tool is executing as a background MCP task. */
+    taskMode?: boolean;
 };
 
 /**
  * Helper tool - tools implemented directly in the MCP server.
- * Type discriminator: 'internal'
+ * Type discriminator: {@link TOOL_TYPE.INTERNAL}
  */
 export type HelperTool = ToolBase & {
     /** Type discriminator for helper/internal tools */
-    type: 'internal';
+    type: typeof TOOL_TYPE.INTERNAL;
     /**
      * Executes the tool with the given arguments
      * @param toolArgs - Arguments and server references
      * @returns Promise resolving to the tool's output
      */
-    call: (toolArgs: InternalToolArgs) => Promise<object>;
+    call: (toolArgs: InternalToolArgs) => Promise<ToolResponse>;
 };
 
 /**
  * Actor MCP tool - tools from Actorized MCP servers that this server proxies.
- * Type discriminator: 'actor-mcp'
+ * Type discriminator: {@link TOOL_TYPE.ACTOR_MCP}
  */
 export type ActorMcpTool = ToolBase & {
     /** Type discriminator for actor MCP tools */
-    type: 'actor-mcp';
+    type: typeof TOOL_TYPE.ACTOR_MCP;
     /** Origin MCP server tool name is needed for the tool call */
     originToolName: string;
     /** ID of the Actorized MCP server - for example, apify/actors-mcp-server */
@@ -187,47 +218,6 @@ export type ActorMcpTool = ToolBase & {
  */
 export type ToolEntry = HelperTool | ActorTool | ActorMcpTool;
 
-/**
- * Price for a single event in a specific tier.
- */
-export type TieredEventPrice = {
-    tieredEventPriceUsd: number;
-};
-
-/**
- * Allowed pricing tiers for tiered event pricing.
- */
-export type PricingTier = 'FREE' | 'BRONZE' | 'SILVER' | 'GOLD' | 'PLATINUM' | 'DIAMOND';
-
-/**
- * Describes a single chargeable event for an Actor.
- * Supports either flat pricing (eventPriceUsd) or tiered pricing (eventTieredPricingUsd).
- */
-export type ActorChargeEvent = {
-    eventTitle: string;
-    eventDescription?: string;
-    /** Flat price per event in USD (if not tiered) */
-    eventPriceUsd?: number;
-    /** Tiered pricing per event, by tier name (FREE, BRONZE, etc.) */
-    eventTieredPricingUsd?: Partial<Record<PricingTier, TieredEventPrice>>;
-};
-
-export type TieredPricing = {
-    [tier: string]: {
-        tieredPricePerUnitUsd: number;
-    };
-}
-
-type PricePerEventActorPricingInfo = PricePerEventActorPricingInfoOutdated & {
-    pricingPerEvent: {
-        actorChargeEvents: Record<string, ActorChargeEvent>;
-    };
-}
-
-export type PricingInfo = ActorRunPricingInfo & {
-    tieredPricing?: TieredPricing;
-} | PricePerEventActorPricingInfo;
-
 export type ToolCategory = (typeof CATEGORY_NAMES)[number];
 /**
  * Selector for tools input - can be a category key or a specific tool name.
@@ -247,8 +237,6 @@ export type Input = {
     enableActorAutoLoading?: boolean | string;
     enableAddingActors?: boolean | string;
     maxActorMemoryBytes?: number;
-    debugActor?: string;
-    debugActorInput?: unknown;
     /**
      * Tool selectors to include (category keys or concrete tool names).
      * When `tools` is undefined that means the default tool categories should be loaded.
@@ -257,9 +245,6 @@ export type Input = {
      */
     tools?: ToolSelector[] | string;
 };
-
-// Utility type to get a union of values from an object type
-export type ActorPricingModel = (typeof ACTOR_PRICING_MODEL)[keyof typeof ACTOR_PRICING_MODEL];
 
 /**
  * Telemetry environment type.
@@ -286,6 +271,8 @@ export type ActorStoreList = ActorStoreListOutdated & {
     isWhiteListedForAgenticPayments?: boolean;
     notice?: string | null;
     userFullName?: string;
+    /** Populated when the search call is made with `includeInputSchema=true`. */
+    inputSchema?: ActorStoreInputSchema;
     stats: ActorStats & {
         actorReviewCount?: number;
         actorReviewRating?: number;
@@ -325,10 +312,7 @@ export type ActorDefinitionStorage = {
                 fields?: string[];
             };
             display: {
-                properties: Record<
-                    string,
-                    object
-                >;
+                properties: Record<string, object>;
             };
         }
     >;
@@ -352,12 +336,11 @@ export type PromptBase = Prompt & {
     render: (args: Record<string, string>) => string;
 };
 
-export type ActorInputSchemaProperties = Record<string, SchemaProperties>;
 export type DatasetItem = Record<number | string, unknown>;
 /**
  * Apify token type.
  *
- * Can be null or undefined in the case of Skyfire requests.
+ * Can be null or undefined when a payment provider allows unauthenticated access.
  */
 export type ApifyToken = string | null | undefined;
 
@@ -366,6 +349,7 @@ export type ApifyToken = string | null | undefined;
  * Derived from TOOL_STATUS to ensure type safety and avoid duplication.
  */
 export type ToolStatus = (typeof TOOL_STATUS)[keyof typeof TOOL_STATUS];
+export type FailureCategory = (typeof FAILURE_CATEGORY)[keyof typeof FAILURE_CATEGORY];
 
 /**
  * Properties for tool call telemetry events sent to Segment.
@@ -382,67 +366,153 @@ export type ToolCallTelemetryProperties = {
     tool_name: string;
     tool_status: ToolStatus;
     tool_exec_time_ms: number;
+    /** UTF-8 bytes of tool response text content (`content[].text`). */
+    tool_response_content_bytes?: number;
+    /** UTF-8 bytes of JSON-stringified structured content. */
+    tool_response_structured_content_bytes?: number;
+    /** UTF-8 bytes of returned files/records: image/audio base64 `data` and embedded `resource` blob/text. */
+    tool_response_file_bytes?: number;
+    failure_category?: FailureCategory;
+    failure_http_status?: number;
+    failure_detail?: string;
+    actor_name?: string;
+    actor_id?: string;
+    /** Run the call touched. `run_status` is the run's own outcome, distinct from `tool_status`. */
+    run_id?: string;
+    run_status?: string;
+    dataset_id?: string;
+    key_value_store_id?: string;
+    validation_keyword?: string;
+    validation_path?: string;
+    validation_missing_property?: string;
+    validation_additional_property?: string;
+    validation_error_count?: number;
 };
 
 /**
- * Internal server mode that controls which tool variants, descriptions, and response
- * formats are served. Every internal call site (tool loading, category resolution,
- * server instructions) uses this type.
+ * Segment 'MCP Reported Problem' event payload: the `report-problem` submission plus the same
+ * session/client context carried by {@link ToolCallTelemetryProperties}. A downstream Segment
+ * destination consumes this event for Slack/GitHub fan-out.
+ */
+export type ReportedProblemTelemetryProperties = Pick<
+    ToolCallTelemetryProperties,
+    | 'app'
+    | 'app_version'
+    | 'mcp_client_name'
+    | 'mcp_client_version'
+    | 'mcp_protocol_version'
+    | 'mcp_session_id'
+    | 'transport_type'
+> & {
+    message: string;
+    actor_id?: string;
+    actor_run_id?: string;
+    related_tools?: string[];
+};
+
+export type AjvErrorDetails = Pick<
+    ToolCallTelemetryProperties,
+    | 'validation_keyword'
+    | 'validation_path'
+    | 'validation_missing_property'
+    | 'validation_additional_property'
+    | 'validation_error_count'
+>;
+
+/**
+ * Telemetry reported by tool handlers on the response object.
+ * The server reads `toolTelemetry` from the response, strips it, and maps it to CallDiagnostics.
+ */
+export type ToolTelemetryContext = {
+    toolStatus?: ToolStatus;
+    failureCategory?: FailureCategory;
+    failureHttpStatus?: number;
+    failureDetail?: string;
+    actorId?: string;
+    ajvErrorDetails?: AjvErrorDetails;
+};
+
+export type CallDiagnostics = Pick<
+    ToolCallTelemetryProperties,
+    | 'failure_category'
+    | 'failure_http_status'
+    | 'failure_detail'
+    | 'actor_name'
+    | 'actor_id'
+    | 'run_id'
+    | 'run_status'
+    | 'dataset_id'
+    | 'key_value_store_id'
+    | 'validation_keyword'
+    | 'validation_path'
+    | 'validation_missing_property'
+    | 'validation_additional_property'
+    | 'validation_error_count'
+>;
+
+/**
+ * Server mode — controls which tool variants, descriptions, and response formats are served.
  *
  * - `'default'` — standard MCP tools for generic clients (sync/async execution, text responses)
- * - `'openai'` — OpenAI-specific tool variants (always-async execution, widget metadata)
+ * - `'apps'`    — MCP Apps tool variants (always-async execution, widget metadata)
  *
- * **Relationship to {@link UiMode}:** `ServerMode` is the internal representation;
- * `UiMode` is the external API surface exposed to callers (currently only `'openai'`).
- * The conversion happens in `ActorsMcpServer` constructor: `options.uiMode ?? 'default'`.
+ * The `'apps'` name comes from the [MCP Apps specification (2026-01-26)](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx),
+ * the open standard for widget-embedded UI in MCP clients. The value was previously
+ * named `'openai'` but is renamed here to reflect that the protocol is no longer
+ * OpenAI-specific; `'openai'` is kept as a deprecated alias at CLI/env ingestion
+ * (see {@link parseServerMode}) and is silently normalized to `'apps'`.
  */
-export type ServerMode = 'default' | 'openai';
+export const SERVER_MODE = {
+    DEFAULT: 'default',
+    APPS: 'apps',
+} as const;
+export type SERVER_MODE = (typeof SERVER_MODE)[keyof typeof SERVER_MODE];
 
 /** All valid server modes, for iteration in tests and caches. */
-export const SERVER_MODES: readonly ServerMode[] = ['default', 'openai'] as const;
+export const SERVER_MODES: readonly SERVER_MODE[] = Object.values(SERVER_MODE);
 
 /**
- * External API surface for selecting a UI mode — passed via `options.uiMode` in
- * {@link ActorsMcpServerOptions}. Excludes `'default'` because the absence of a
- * UI mode (`undefined`) maps to `ServerMode = 'default'` internally.
- *
- * **Relationship to {@link ServerMode}:** `UiMode` is a strict subset of `ServerMode`.
- * Callers set `uiMode?: UiMode`; the server normalizes it to `ServerMode` at construction.
+ * Server mode option — a concrete {@link SERVER_MODE} or `'auto'` to resolve from
+ * the client's `initialize` capabilities at connection time.
  */
-export type UiMode = Exclude<ServerMode, 'default'>;
-
-/** Set of valid UiMode values for O(1) membership checks at runtime. */
-const UI_MODES: ReadonlySet<string> = new Set<string>(SERVER_MODES.filter((m): m is UiMode => m !== 'default'));
+export type ServerModeOption = SERVER_MODE | 'auto';
 
 /**
- * Parse an untrusted string into a valid UiMode, returning `undefined` for invalid values.
- * Use at ingestion boundaries (URL params, env vars) to prevent invalid modes from propagating.
- */
-export function parseUiMode(value: string | null | undefined): UiMode | undefined {
-    if (!value) return undefined;
-    if (value === 'true') return 'openai'; // 'true' is the new standard; 'openai' is deprecated alias
-    return UI_MODES.has(value) ? (value as UiMode) : undefined;
-}
-
-/**
- * Parameters for executing a direct actor tool (`type: 'actor'`).
+ * Parameters for executing a direct actor tool ({@link TOOL_TYPE.ACTOR}).
  * Used by ActorExecutor implementations.
  */
 export type ActorExecutionParams = {
     /** Full name of the Actor (e.g., "apify/rag-web-browser") */
     actorFullName: string;
-    /** Input to pass to the Actor (skyfire-pay-id already stripped) */
+    /** Input to pass to the Actor (payment fields already stripped) */
     input: Record<string, unknown>;
-    /** Apify client (may be Skyfire-aware) */
+    /** Apify client (may include payment headers) */
     apifyClient: ApifyClient;
-    /** Call options (memory, timeout) */
-    callOptions: { memory?: number; timeout?: number };
+    /** Call options forwarded to apifyClient.actor(...).start(input, callOptions) */
+    callOptions: {
+        memory?: number;
+        timeout?: number;
+        build?: string;
+        maxItems?: number;
+        maxTotalChargeUsd?: number;
+    };
     /** Progress tracker for sending progress notifications */
     progressTracker?: ProgressTracker | null;
     /** Signal for aborting the execution */
     abortSignal?: AbortSignal;
     /** MCP session ID for logging */
     mcpSessionId?: string;
+    /**
+     * Per-Actor dataset row properties from {@link ActorTool.datasetItemsSchema}. Forwarded
+     * by the request handler so the executor can inject `itemsSchema` into the response.
+     */
+    datasetItemsSchema?: Record<string, unknown>;
+    /**
+     * When true, the call is wrapped in an MCP task. The executor ignores the LLM-provided
+     * `waitSecs` and waits until the run reaches a terminal status — honoring `waitSecs` in
+     * task mode would let the task complete before the Actor has produced output.
+     */
+    taskMode?: boolean;
 };
 
 /**
@@ -456,9 +526,9 @@ export type ActorExecutionResult = {
 } | null;
 
 /**
- * Executor for direct actor tools (`type: 'actor'`).
+ * Executor for direct actor tools ({@link TOOL_TYPE.ACTOR}).
  * Selected at server construction time based on serverMode.
- * Default mode runs synchronously; OpenAI mode runs async with widget metadata.
+ * Default mode runs synchronously; apps mode runs async with widget metadata.
  */
 export type ActorExecutor = {
     executeActorTool(params: ActorExecutionParams): Promise<ActorExecutionResult>;
@@ -517,9 +587,10 @@ export type ActorsMcpServerOptions = {
     actorStore?: ActorStore;
     setupSigintHandler?: boolean;
     /**
-     * Switch to enable Skyfire agentic payment mode.
+     * Payment provider for agentic payment modes (e.g., Skyfire, x402).
+     * When set, enables payment-gated tool execution.
      */
-    skyfireMode?: boolean;
+    paymentProvider?: PaymentProvider;
     /**
      * Allow unauthenticated mode - tools can be called without an Apify API token.
      * This is primarily used for making documentation tools available without authentication.
@@ -551,9 +622,8 @@ export type ActorsMcpServerOptions = {
      *  which is different for local and remote server based on the transport type.
      * - 'stdio': Direct/local stdio connection
      * - 'http': Remote HTTP streamable connection
-     * - 'sse': Remote Server-Sent Events (SSE) connection (deprecated, removal on 2026-04-01)
      */
-    transportType?: 'stdio' | 'http' | 'sse';
+    transportType?: 'stdio' | 'http';
     /**
      * Apify API token for authentication
      * Primarily used by stdio transport when token is read from ~/.apify/auth.json file
@@ -561,17 +631,29 @@ export type ActorsMcpServerOptions = {
      */
     token?: string;
     /**
-     * UI mode for tool responses.
-     * - 'openai': OpenAI specific widget rendering
-     * If not specified, defaults to 'default' mode (no widget rendering).
-     * Normalized to {@link ServerMode} at server construction.
+     * Server mode — controls tool variants and response formats. See {@link SERVER_MODE}.
+     * Pass `'auto'` (or omit) to resolve from the client's `initialize` capabilities;
+     * pass `'default'` or `'apps'` to force a specific mode and skip auto-detect.
+     * Defaults to `'auto'` when unset.
      */
-    uiMode?: UiMode;
-}
+    serverMode?: ServerModeOption;
+    /**
+     * @deprecated Use `serverMode` instead.
+     */
+    uiMode?: string;
+};
+
+/** Compact schema returned by `GET /v2/store?includeInputSchema=true`; produced by apify-core `trimInputSchema`. */
+export type ActorStoreInputSchema = {
+    type: 'object';
+    properties: Record<string, { type: string | string[] }>;
+    required?: string[];
+};
 
 export type StructuredActorCard = {
     title?: string;
     url: string;
+    id: string;
     fullName: string;
     pictureUrl?: string;
     developer: {
@@ -594,7 +676,21 @@ export type StructuredActorCard = {
     };
     modifiedAt?: string;
     isDeprecated: boolean;
-}
+    inputFields?: ActorStoreInputSchema;
+    inputFieldsTruncated?: boolean;
+    inputFieldsTotalCount?: number;
+};
+
+/**
+ * Context for minting Apify Console links instead of public website links.
+ * Resolved from the session token by `getConsoleLinkContext` — present only for
+ * Console UI token sessions (its presence is the signal to mint Console links). The
+ * Console origin is global per cluster, so it lives in the builders, not here.
+ */
+export type ConsoleLinkContext = {
+    /** Org user id when the session is org-scoped; adds the `/organization/<orgId>` path prefix. */
+    organizationId?: string;
+};
 
 /**
  * Options for controlling which sections to include in an Actor card.
@@ -611,7 +707,16 @@ export type ActorCardOptions = {
     includeRating?: boolean;
     /** Include metadata (developer, categories, last modified date, deprecation warning) */
     includeMetadata?: boolean;
-}
+    /** User's plan tier. Defaults to FREE inside the formatters when unset. */
+    userTier?: PricingTier;
+    /**
+     * true → filter `tieredPricing` down to the user's resolved tier (search-actors).
+     * false/undefined → keep the full tiered matrix (fetch-actor-details).
+     */
+    simplifyPricingForUserTier?: boolean;
+    /** When set, Actor links are minted as Apify Console links instead of public website links. */
+    linkContext?: ConsoleLinkContext;
+};
 
 /**
  * MCP request parameters with Apify-specific extensions.
@@ -626,8 +731,6 @@ export type ApifyRequestParams = {
         mcpSessionId?: string;
         /** Apify API token for authentication */
         apifyToken?: string;
-        /** List of Actor IDs that the user has rented */
-        userRentedActorIds?: string[];
         /** Progress token for out-of-band progress notifications (standard MCP) */
         progressToken?: string | number;
         /** Allow other metadata fields */

@@ -1,27 +1,20 @@
-import type { ApifyClientOptions } from 'apify';
+import type { ApifyClientOptions } from 'apify-client';
 import { ApifyClient as _ApifyClient } from 'apify-client';
-import type { AxiosRequestConfig } from 'axios';
 
-import { USER_AGENT_ORIGIN } from './const.js';
-import type { ActorsMcpServer } from './mcp/server.js';
-import type { ApifyToken } from './types.js';
+import type { PaymentHeaders } from './payments/types.js';
+
+// Appended to the client's User-Agent via apify-client's userAgentSuffix option.
+const USER_AGENT_ORIGIN = 'Origin/mcp-server';
+
+// Request origin headers
+const REQUEST_ORIGIN_HEADER = 'X-Apify-Request-Origin';
+const REQUEST_ORIGIN_VALUE = 'MCP';
 
 type ExtendedApifyClientOptions = Omit<ApifyClientOptions, 'token'> & {
     token?: string | null | undefined;
-    skyfirePayId?: string;
+    /** Payment headers to forward on outbound API requests (from PaymentProvider.getPaymentHeaders) */
+    paymentHeaders?: PaymentHeaders;
 };
-
-/**
- * Adds a User-Agent header to the request config.
- * @param config
- * @private
- */
-function addUserAgent(config: AxiosRequestConfig): AxiosRequestConfig {
-    const updatedConfig = { ...config };
-    updatedConfig.headers = updatedConfig.headers ?? {};
-    updatedConfig.headers['User-Agent'] = `${updatedConfig.headers['User-Agent'] ?? ''}; ${USER_AGENT_ORIGIN}`;
-    return updatedConfig;
-}
 
 export function getApifyAPIBaseUrl(): string {
     // Workaround for Actor server where the platform APIFY_API_BASE_URL did not work with getActorDefinition from actors.ts
@@ -32,9 +25,9 @@ export function getApifyAPIBaseUrl(): string {
 export class ApifyClient extends _ApifyClient {
     constructor(options: ExtendedApifyClientOptions) {
         /**
-         * In order to publish to DockerHub, we need to run their build task to validate our MCP server.
-         * This was failing since we were sending this dummy token to Apify in order to build the Actor tools.
-         * So if we encounter this dummy value, we remove it to use Apify client as unauthenticated, which is sufficient
+         * To publish to DockerHub, we need to run their build task to validate our MCP server.
+         * This was failing since we were sending this dummy token to Apify to build the Actor tools.
+         * So if we encounter this dummy value, we remove it to use an Apify client as unauthenticated, which is enough
          * for server start and listing of tools.
          */
         if (options.token?.toLowerCase() === 'your-apify-token' || options.token === null) {
@@ -42,44 +35,16 @@ export class ApifyClient extends _ApifyClient {
             delete options.token;
         }
 
-        const { skyfirePayId, ...clientOptions } = options;
-        const requestInterceptors = [addUserAgent];
-        /**
-         * Add skyfire-pay-id header if provided.
-         */
-        if (skyfirePayId) {
-            requestInterceptors.push((config) => {
-                const updatedConfig = { ...config };
-                updatedConfig.headers = updatedConfig.headers ?? {};
-                updatedConfig.headers['skyfire-pay-id'] = skyfirePayId;
-                return updatedConfig;
-            });
-        }
+        const { paymentHeaders, ...clientOptions } = options;
+        // Static headers: MCP origin plus any payment headers from a PaymentProvider.
+        const staticHeaders = { [REQUEST_ORIGIN_HEADER]: REQUEST_ORIGIN_VALUE, ...paymentHeaders };
 
         super({
             // token null case is handled, we can assert type here
-            ...clientOptions as ApifyClientOptions,
+            ...(clientOptions as ApifyClientOptions),
             baseUrl: getApifyAPIBaseUrl(),
-            requestInterceptors,
+            userAgentSuffix: USER_AGENT_ORIGIN,
+            requestInterceptors: [(config) => ({ ...config, headers: { ...config.headers, ...staticHeaders } })],
         });
     }
-}
-
-/**
- * Creates ApifyClient with appropriate credentials based on Skyfire mode.
- * In Skyfire mode, uses skyfire-pay-id from args; otherwise uses apifyToken.
- *
- * @param apifyMcpServer - The MCP server instance with configuration options
- * @param args - Tool arguments that may contain skyfire-pay-id
- * @param apifyToken - Standard Apify token for non-Skyfire mode
- * @returns ApifyClient instance configured for the appropriate mode
- */
-export function createApifyClientWithSkyfireSupport(
-    apifyMcpServer: ActorsMcpServer,
-    args: Record<string, unknown>,
-    apifyToken: ApifyToken,
-): ApifyClient {
-    return apifyMcpServer.options.skyfireMode && typeof args['skyfire-pay-id'] === 'string'
-        ? new ApifyClient({ skyfirePayId: args['skyfire-pay-id'] })
-        : new ApifyClient({ token: apifyToken });
 }

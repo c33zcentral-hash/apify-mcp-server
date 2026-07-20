@@ -1,17 +1,16 @@
 /**
  * Helper functions for working with tool categories.
- * Separated from tools.ts to break circular dependency: tools/index.ts → utils/tools.ts → tools/categories.ts → tools/index.ts
+ * Separated from tools.ts to break circular dependency: tools/index.ts → utils/tools.ts → tools/registry.ts → tools/index.ts
  */
-import { getCategoryTools } from '../tools/categories.js';
-import type { ServerMode, ToolCategory, ToolEntry } from '../types.js';
+import { getCategoryTools } from '../tools/registry.js';
+import type { SERVER_MODE, ToolCategory, ToolEntry } from '../types.js';
 
 /**
  * Returns the tool objects for the given category names resolved for the specified mode.
  */
-export function getExpectedToolsByCategories(categories: ToolCategory[], mode: ServerMode): ToolEntry[] {
+export function getExpectedToolsByCategories(categories: ToolCategory[], mode: SERVER_MODE): ToolEntry[] {
     const resolved = getCategoryTools(mode);
-    return categories
-        .flatMap((category) => resolved[category] || []);
+    return categories.flatMap((category) => resolved[category] || []);
 }
 
 /**

@@ -1,10 +1,41 @@
 import { describe, expect, it } from 'vitest';
 
 import { ACTOR_ENUM_MAX_LENGTH, ACTOR_MAX_DESCRIPTION_LENGTH } from '../../src/const.js';
-import { buildApifySpecificProperties, decodeDotPropertyNames, encodeDotPropertyNames,
-    filterAndShortenEnum, inferArrayItemsTypeIfMissing, inferArrayItemType, markInputPropertiesAsRequired, shortenProperties,
-    transformActorInputSchemaProperties } from '../../src/tools/utils.js';
-import type { ActorInputSchema, SchemaProperties } from '../../src/types.js';
+import { SchemaTooLargeError } from '../../src/errors.js';
+import {
+    buildActorInputSchema,
+    buildApifySpecificProperties,
+    decodeDotPropertyNames,
+    encodeDotPropertyNames,
+    filterAndShortenEnum,
+    fixedAjvCompile,
+    inferArrayItemsTypeIfMissing,
+    inferArrayItemType,
+    MAX_UNTRUSTED_SCHEMA_BYTES,
+    markInputPropertiesAsRequired,
+    shortenProperties,
+    transformActorInputSchemaProperties,
+} from '../../src/tools/actor_input_schema.js';
+import { isActorBlockedUnderPaymentProvider } from '../../src/tools/actor_tool_naming.js';
+import type { ActorInfo, ActorInputSchema, SchemaProperties, ToolBase, ToolEntry } from '../../src/types.js';
+import { TOOL_TYPE } from '../../src/types.js';
+import { ajv } from '../../src/utils/ajv.js';
+import { extractActorName, getToolFullName, getToolPublicFieldOnly } from '../../src/utils/tools.js';
+
+describe('fixedAjvCompile — untrusted schema size cap', () => {
+    it('compiles a normal-sized schema', () => {
+        const validate = fixedAjvCompile(ajv, { type: 'object', properties: { url: { type: 'string' } } });
+        expect(validate({ url: 'https://example.com' })).toBe(true);
+    });
+
+    it('throws SchemaTooLargeError on an oversized schema before AJV codegen runs (DoS guard)', () => {
+        const properties: Record<string, unknown> = {};
+        for (let i = 0; i < 16000; i++) properties[`p${i}`] = { type: 'string' };
+        const huge = { type: 'object', properties };
+        expect(JSON.stringify(huge).length).toBeGreaterThan(MAX_UNTRUSTED_SCHEMA_BYTES);
+        expect(() => fixedAjvCompile(ajv, huge)).toThrow(SchemaTooLargeError);
+    });
+});
 
 describe('buildApifySpecificProperties', () => {
     it('should add resource picker structure to array items with editor resourcePicker', () => {
@@ -159,10 +190,7 @@ describe('buildApifySpecificProperties', () => {
         expect(result.proxy.properties?.apifyProxyGroups).toBeDefined();
         expect(result.proxy.properties?.apifyProxyGroups.type).toBe('array');
         expect(result.proxy.properties?.apifyProxyGroups.items).toBeDefined();
-        expect(result.proxy.properties?.apifyProxyGroups.items?.enum).toEqual([
-            'RESIDENTIAL',
-            'DATACENTER',
-        ]);
+        expect(result.proxy.properties?.apifyProxyGroups.items?.enum).toEqual(['RESIDENTIAL', 'DATACENTER']);
 
         // Check that proxy object has proxyUrls property
         expect(result.proxy.properties?.proxyUrls).toBeDefined();
@@ -201,7 +229,7 @@ describe('buildApifySpecificProperties', () => {
         expect(result.otherProp).toEqual(properties.otherProp);
     });
 
-    it('should not modify properties that don\'t match special cases', () => {
+    it("should not modify properties that don't match special cases", () => {
         const properties: Record<string, SchemaProperties> = {
             regularObject: {
                 type: 'object',
@@ -357,7 +385,10 @@ describe('shortenProperties', () => {
     it('should shorten enum values if they exceed the limit', () => {
         // Create an enum with many values to exceed the character limit
         const value = 'enum-value-';
-        const enumValues = Array.from({ length: Math.ceil(ACTOR_ENUM_MAX_LENGTH / value.length) + 1 }, (_, i) => `${value}${i}`);
+        const enumValues = Array.from(
+            { length: Math.ceil(ACTOR_ENUM_MAX_LENGTH / value.length) + 1 },
+            (_, i) => `${value}${i}`,
+        );
         const properties: Record<string, SchemaProperties> = {
             prop1: {
                 type: 'string',
@@ -387,7 +418,10 @@ describe('shortenProperties', () => {
     it('should shorten items.enum values if they exceed the limit', () => {
         // Create an enum with many values to exceed the character limit
         const value = 'enum-value-';
-        const enumValues = Array.from({ length: Math.ceil(ACTOR_ENUM_MAX_LENGTH / value.length) + 1 }, (_, i) => `${value}${i}`);
+        const enumValues = Array.from(
+            { length: Math.ceil(ACTOR_ENUM_MAX_LENGTH / value.length) + 1 },
+            (_, i) => `${value}${i}`,
+        );
         const properties: Record<string, SchemaProperties> = {
             prop1: {
                 type: 'array',
@@ -721,8 +755,19 @@ describe('transformActorInputSchemaProperties', () => {
         expect(result.sources.items).toBeDefined();
         expect(result.sources.items?.properties?.url).toBeDefined();
         // 3. filterSchemaProperties: only allowed fields present
+        // NOTE: includes phantom `default: undefined` etc. from filterSchemaProperties (#675).
         expect(Object.keys(result['foo-dot-bar'])).toEqual(
-            expect.arrayContaining(['title', 'description', 'type', 'default', 'prefill', 'properties', 'items', 'required', 'enum']),
+            expect.arrayContaining([
+                'title',
+                'description',
+                'type',
+                'default',
+                'prefill',
+                'properties',
+                'items',
+                'required',
+                'enum',
+            ]),
         );
         // 4. shortenProperties: longDesc is truncated, enumProp.enum is shortened
         expect(result.longDesc.description.length).toBeLessThanOrEqual(ACTOR_MAX_DESCRIPTION_LENGTH + 3);
@@ -901,5 +946,119 @@ describe('filterAndShortenEnum', () => {
         const shortenedList = filterAndShortenEnum(enumList);
 
         expect(shortenedList?.length || 0).toBe(ACTOR_ENUM_MAX_LENGTH / wordLength);
+    });
+});
+
+describe('getToolFullName', () => {
+    it('returns actorFullName for actor tools', () => {
+        const tool = {
+            type: TOOL_TYPE.ACTOR,
+            name: 'actor-web-scraper-by-apify',
+            actorFullName: 'apify/web-scraper',
+        } as unknown as ToolEntry;
+        expect(getToolFullName(tool)).toBe('apify/web-scraper');
+    });
+
+    it('returns name for internal tools', () => {
+        const tool = { type: TOOL_TYPE.INTERNAL, name: 'store-search' } as unknown as ToolEntry;
+        expect(getToolFullName(tool)).toBe('store-search');
+    });
+
+    it('returns name for actor-mcp tools', () => {
+        const tool = {
+            type: TOOL_TYPE.ACTOR_MCP,
+            name: 'mcp-tool-search',
+            actorId: 'apify/actors-mcp-server',
+        } as unknown as ToolEntry;
+        expect(getToolFullName(tool)).toBe('mcp-tool-search');
+    });
+});
+
+describe('extractActorName', () => {
+    it('returns actorFullName for actor tools', () => {
+        const tool = { type: TOOL_TYPE.ACTOR, actorFullName: 'apify/web-scraper' } as unknown as ToolEntry;
+        expect(extractActorName(tool)).toBe('apify/web-scraper');
+    });
+
+    it('returns actorId for actor-mcp tools', () => {
+        const tool = { type: TOOL_TYPE.ACTOR_MCP, actorId: 'apify/actors-mcp-server' } as unknown as ToolEntry;
+        expect(extractActorName(tool)).toBe('apify/actors-mcp-server');
+    });
+
+    it('parses actor name from call-actor args', () => {
+        const tool = { type: TOOL_TYPE.INTERNAL, name: 'call-actor' } as unknown as ToolEntry;
+        expect(extractActorName(tool, { actor: 'apify/web-scraper' })).toBe('apify/web-scraper');
+    });
+
+    it('strips :toolName suffix from call-actor args', () => {
+        const tool = { type: TOOL_TYPE.INTERNAL, name: 'call-actor' } as unknown as ToolEntry;
+        expect(extractActorName(tool, { actor: 'apify/actors-mcp-server:search' })).toBe('apify/actors-mcp-server');
+    });
+
+    it('returns undefined for internal tools without actor arg', () => {
+        const tool = { type: TOOL_TYPE.INTERNAL, name: 'store-search' } as unknown as ToolEntry;
+        expect(extractActorName(tool)).toBeUndefined();
+    });
+});
+
+describe('buildActorInputSchema + getToolPublicFieldOnly pipeline', () => {
+    // Regression: #637 — end-to-end check that required fields survive the full pipeline.
+    it('keeps `query` in required across the full tools/list pipeline for a rag-web-browser-shaped schema', () => {
+        const upstream: ActorInputSchema = {
+            type: 'object',
+            properties: {
+                query: {
+                    type: 'string',
+                    title: 'Search term or URL',
+                    description: 'Enter Google Search keywords or a URL.',
+                    prefill: 'web browser for RAG pipelines',
+                },
+                maxResults: {
+                    type: 'integer',
+                    title: 'Maximum results',
+                    description: 'Max organic results to return.',
+                    default: 3,
+                },
+            },
+            required: ['query'],
+        };
+
+        const { inputSchema } = buildActorInputSchema('apify/rag-web-browser', upstream, false);
+
+        const tool = {
+            name: 'apify--rag-web-browser',
+            description: 'RAG web browser',
+            inputSchema,
+        } as ToolBase;
+
+        const pub = getToolPublicFieldOnly(tool, { filterWidgetMeta: false });
+        const schema = pub.inputSchema as {
+            required?: string[];
+            properties?: Record<string, { description?: string }>;
+        };
+
+        expect(schema.required).toEqual(['query']);
+        expect(schema.properties?.query?.description).toMatch(/^\*\*REQUIRED\*\*/);
+        expect(schema.properties?.maxResults?.description).not.toMatch(/^\*\*REQUIRED\*\*/);
+    });
+});
+
+describe('isActorBlockedUnderPaymentProvider', () => {
+    const actorInfo = ({ standby, mcpPath = null }: { standby: boolean; mcpPath?: string | null }): ActorInfo => ({
+        definition: { actorFullName: 'user/actor', id: 'act' } as ActorInfo['definition'],
+        actor: { actorStandby: standby ? { isEnabled: true } : undefined } as ActorInfo['actor'],
+        webServerMcpPath: mcpPath,
+    });
+
+    it('blocks standby Actors', () => {
+        expect(isActorBlockedUnderPaymentProvider(actorInfo({ standby: true }))).toBe(true);
+    });
+
+    it('does not block normal Actors', () => {
+        expect(isActorBlockedUnderPaymentProvider(actorInfo({ standby: false }))).toBe(false);
+    });
+
+    it('does not block MCP path without standby (must match list-tools filter)', () => {
+        expect(isActorBlockedUnderPaymentProvider(actorInfo({ standby: false, mcpPath: '/mcp' }))).toBe(false);
     });
 });

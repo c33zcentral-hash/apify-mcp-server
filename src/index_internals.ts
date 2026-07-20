@@ -3,15 +3,22 @@
 */
 
 import { ApifyClient } from './apify_client.js';
-import { APIFY_FAVICON_URL, defaults, HelperTools, SERVER_NAME, SERVER_TITLE } from './const.js';
+import { APIFY_FAVICON_URL, defaults, HELPER_TOOLS, type HelperToolName, SERVER_NAME, SERVER_TITLE } from './const.js';
 import { processParamsGetTools } from './mcp/utils.js';
+import { resolvePaymentProvider } from './payments/index.js';
+import type { PaymentProvider } from './payments/types.js';
 import { getServerCard } from './server_card.js';
-import { addTool } from './tools/common/add_actor.js';
-import { getActorsAsTools, getCategoryTools, getDefaultTools, getUnauthEnabledToolCategories,
-    toolCategoriesEnabledByDefault, unauthEnabledTools } from './tools/index.js';
-import { actorNameToToolName } from './tools/utils.js';
-import type { ActorStore, ServerCard, ServerMode, ToolCategory, UiMode } from './types.js';
-import { parseUiMode, SERVER_MODES } from './types.js';
+import { actorNameToToolName } from './tools/actor_tool_naming.js';
+import { addActor } from './tools/actors/add_actor.js';
+import {
+    getActorsAsTools,
+    getCategoryTools,
+    getDefaultTools,
+    getUnauthEnabledToolCategories,
+    toolCategoriesEnabledByDefault,
+    unauthEnabledTools,
+} from './tools/index.js';
+import type { ActorStore, ServerCard, ToolCategory } from './types.js';
 import { parseCommaSeparatedList, parseQueryParamList, readJsonFile } from './utils/generic.js';
 import { redactSkyfirePayId } from './utils/logging.js';
 import { getExpectedToolNamesByCategories } from './utils/tool_categories_helpers.js';
@@ -25,21 +32,22 @@ export {
     getServerCard,
     TTLLRUCache,
     actorNameToToolName,
-    HelperTools,
+    HELPER_TOOLS,
+    type HelperToolName,
     SERVER_NAME,
     SERVER_TITLE,
     defaults,
     getDefaultTools,
-    addTool,
+    addActor,
+    /**
+     * @deprecated Use `addActor` instead. Kept for the apify-mcp-server-internal migration; remove once it no longer imports `addTool`.
+     */
+    addActor as addTool,
     getCategoryTools,
-    parseUiMode,
-    SERVER_MODES,
-    type ServerMode,
     toolCategoriesEnabledByDefault,
     type ActorStore,
     type ServerCard,
     type ToolCategory,
-    type UiMode,
     processParamsGetTools,
     getActorsAsTools,
     getToolPublicFieldOnly,
@@ -48,5 +56,15 @@ export {
     readJsonFile,
     parseCommaSeparatedList,
     parseQueryParamList,
+    resolvePaymentProvider,
+    type PaymentProvider,
+    /**
+     * @deprecated Use the server's paymentProvider.redactForLogging instead. This will be removed in a future release.
+     */
     redactSkyfirePayId,
 };
+
+/** @deprecated Use HELPER_TOOLS / HelperToolName. Kept for backward compatibility with apify-mcp-server-internal. */
+export const HelperTools = HELPER_TOOLS;
+/** @deprecated Use HelperToolName. */
+export type HelperTools = HelperToolName;

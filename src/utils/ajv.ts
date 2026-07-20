@@ -1,30 +1,42 @@
 import type { ValidateFunction } from 'ajv';
 import Ajv from 'ajv';
 
-export const ajv = new Ajv({ coerceTypes: 'array', strict: false });
+export const ajv = new Ajv({ coerceTypes: 'array', strict: false, removeAdditional: true });
+
+// `pattern`/`patternProperties` compile a RegExp from untrusted Actor / proxied-MCP input schemas;
+// a catastrophic-backtracking pattern freezes the single-threaded event loop (ReDoS). `format` is
+// inert today (ajv-formats is not registered) but would arm the same vector if it ever were. This
+// layer only sanitizes LLM args — the Actor re-validates its real input on the run — so dropping
+// regex enforcement removes the DoS surface with no loss of protection. No `src/` schema uses them.
+ajv.removeKeyword('pattern');
+ajv.removeKeyword('patternProperties');
+ajv.removeKeyword('format');
 
 /**
- * Removes the $schema property and fixes the required array from a JSON schema.
- * The z.toJSONSchema() function in Zod 4.x has two issues:
- * 1. Includes a $schema reference that can cause issues when compiling with AJV
- * 2. Incorrectly marks fields with default values as required
+ * Removes the `$schema` property and drops fields with real `default` values from `required`.
  *
- * This function fixes both issues to ensure proper schema validation.
+ * Per Apify's input-schema spec, "Default + Required doesn't make sense" — a field with a
+ * default is effectively optional because the platform fills it in. Zod 4.x `toJSONSchema()`
+ * has the same issue: it lists `.default()` fields as required and emits `$schema` that
+ * breaks AJV compilation.
+ *
+ * Uses a value-check (`field.default !== undefined`) instead of key-presence (`'default' in field`)
+ * because `filterSchemaProperties()` assigns phantom `default: undefined` on every property (#675).
+ *
+ * @see https://github.com/apify/apify-mcp-server/issues/637
  */
-function cleanJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
+export function fixZodSchemaRequired(schema: Record<string, unknown>): Record<string, unknown> {
     const cleaned = { ...schema };
     delete cleaned.$schema;
 
-    // Fix the required array: remove fields that have default values
     if (Array.isArray(cleaned.required) && typeof cleaned.properties === 'object' && cleaned.properties !== null) {
         const properties = cleaned.properties as Record<string, unknown>;
-        cleaned.required = (cleaned.required as string[]).filter(
-            (fieldName) => {
-                const fieldSchema = properties[fieldName];
-                // Only include in required if the field doesn't have a default value
-                return !(typeof fieldSchema === 'object' && fieldSchema !== null && 'default' in fieldSchema);
-            },
-        );
+        cleaned.required = (cleaned.required as string[]).filter((fieldName) => {
+            const fieldSchema = properties[fieldName];
+            if (typeof fieldSchema !== 'object' || fieldSchema === null) return true;
+            // Value-check (NOT `'default' in fieldSchema`) — see docstring for why.
+            return (fieldSchema as { default?: unknown }).default === undefined;
+        });
     }
 
     return cleaned;
@@ -33,8 +45,17 @@ function cleanJsonSchema(schema: Record<string, unknown>): Record<string, unknow
 /**
  * Compiles a JSON schema with AJV, automatically cleaning the $schema property
  * and fixing the required array.
- * This wrapper ensures compatibility with z.toJSONSchema() output.
+ *
+ * **Unknown properties are silently stripped** by the AJV `removeAdditional: true` option
+ * (set on the shared `ajv` instance). MCP / LLM clients regularly send extra top-level keys
+ * (client metadata, duplicated hints, transport leftovers) that would otherwise cause validation
+ * failures. Stripping them is safer than allowing them through with `additionalProperties: true`,
+ * because no downstream code should rely on undeclared properties.
+ *
+ * **Payment fields** (e.g. Skyfire's `skyfire-pay-id`) are removed by the payment provider's
+ * `removePaymentFields()` *before* AJV validation runs (see `prepareToolCallContext()`),
+ * so they are never subject to this stripping.
  */
 export function compileSchema(schema: Record<string, unknown>): ValidateFunction {
-    return ajv.compile(cleanJsonSchema(schema));
+    return ajv.compile(fixZodSchemaRequired(schema));
 }

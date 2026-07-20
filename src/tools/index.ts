@@ -1,19 +1,26 @@
-import { HelperTools } from '../const.js';
-import type { ServerMode, ToolCategory, ToolEntry } from '../types.js';
+import { HELPER_TOOLS } from '../const.js';
+import type { ToolCategory, ToolEntry } from '../types.js';
+import { SERVER_MODE } from '../types.js';
 import { getExpectedToolsByCategories } from '../utils/tool_categories_helpers.js';
-import { CATEGORY_NAME_SET, CATEGORY_NAMES, getCategoryTools, toolCategories, toolCategoriesEnabledByDefault } from './categories.js';
-import { callActorGetDataset } from './core/actor_execution.js';
-import { getActorsAsTools } from './core/actor_tools_factory.js';
+import { getActorsAsTools } from './actors/actor_tools_factory.js';
+import type { ActorsAsToolsResult } from './actors/actor_tools_factory.js';
+import {
+    CATEGORY_NAME_SET,
+    CATEGORY_NAMES,
+    getCategoryTools,
+    toolCategories,
+    toolCategoriesEnabledByDefault,
+} from './registry.js';
 
-// Use string constants instead of importing tool objects to avoid circular dependency
+// Use string constants instead of tool object imports to avoid circular dependencies
 export const unauthEnabledTools: string[] = [
-    HelperTools.DOCS_SEARCH,
-    HelperTools.DOCS_FETCH,
-    HelperTools.STORE_SEARCH,
-    HelperTools.ACTOR_GET_DETAILS,
+    HELPER_TOOLS.DOCS_SEARCH,
+    HELPER_TOOLS.DOCS_FETCH,
+    HELPER_TOOLS.STORE_SEARCH,
+    HELPER_TOOLS.ACTOR_GET_DETAILS,
 ];
 
-// Re-export from categories.ts
+// Re-export from registry.ts
 // This is actually needed to avoid circular dependency issues
 export { CATEGORY_NAME_SET, CATEGORY_NAMES, getCategoryTools, toolCategories, toolCategoriesEnabledByDefault };
 
@@ -21,7 +28,7 @@ export { CATEGORY_NAME_SET, CATEGORY_NAMES, getCategoryTools, toolCategories, to
  * Returns the tool entries for the default-enabled categories resolved for the given mode.
  * Computed here (not in helper file) to avoid module initialization issues.
  */
-export function getDefaultTools(mode: ServerMode = 'default'): ToolEntry[] {
+export function getDefaultTools(mode: SERVER_MODE = SERVER_MODE.DEFAULT): ToolEntry[] {
     return getExpectedToolsByCategories(toolCategoriesEnabledByDefault, mode);
 }
 
@@ -32,11 +39,12 @@ export function getDefaultTools(mode: ServerMode = 'default'): ToolEntry[] {
  */
 export function getUnauthEnabledToolCategories(): ToolCategory[] {
     const unauthEnabledToolsSet = new Set(unauthEnabledTools);
-    const categories = getCategoryTools('default');
+    const categories = getCategoryTools(SERVER_MODE.DEFAULT);
     return (Object.entries(categories) as [ToolCategory, ToolEntry[]][])
         .filter(([, tools]) => tools.every((tool) => unauthEnabledToolsSet.has(tool.name)))
         .map(([category]) => category);
 }
 
 // Export actor-related tools
-export { callActorGetDataset, getActorsAsTools };
+export { getActorsAsTools };
+export type { ActorsAsToolsResult };

@@ -14,7 +14,7 @@ export type BaseTestCase = {
     query: string;
     /** Reference instructions or requirements */
     reference?: string;
-}
+};
 
 /**
  * Test case for tool selection evaluation (Phoenix-based)
@@ -24,13 +24,15 @@ export type ToolSelectionTestCase = {
     /** Expected tools that should be called */
     expectedTools?: string[];
     /** Conversation context (for multi-turn scenarios) */
-    context?: string | {
-        role: string;
-        content: string;
-        tool?: string;
-        input?: Record<string, unknown>;
-    }[];
-} & BaseTestCase
+    context?:
+        | string
+        | {
+              role: string;
+              content: string;
+              tool?: string;
+              input?: Record<string, unknown>;
+          }[];
+} & BaseTestCase;
 
 /**
  * Test case for workflow evaluation (multi-turn agent conversations)
@@ -41,7 +43,13 @@ export type WorkflowTestCase = {
     maxTurns?: number;
     /** Tools to enable for this test (optional, e.g., ["actors", "docs", "apify/rag-web-browser"]) */
     tools?: string[];
-} & BaseTestCase
+    /**
+     * Tool names the harness force-fails with a synthetic INTERNAL_ERROR carrying the real
+     * report-problem nudge (optional). Lets an eval deterministically throw a nudge-eligible error
+     * that the live server + API cannot reproduce on demand. See mcp_client.ts.
+     */
+    failTools?: string[];
+} & BaseTestCase;
 
 /**
  * Test data structure wrapping test cases with version
@@ -51,7 +59,7 @@ export type TestData = {
     version: string;
     /** Array of test cases */
     testCases: BaseTestCase[];
-}
+};
 
 /**
  * MCP Tool definition from the server
@@ -68,4 +76,4 @@ export type McpTool = {
         required?: string[];
         [key: string]: unknown;
     };
-}
+};

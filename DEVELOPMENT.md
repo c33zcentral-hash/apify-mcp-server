@@ -5,7 +5,7 @@
 This repository (**public**) provides:
 - The core MCP server implementation (published as an NPM package)
 - The stdio entry point (CLI)
-- The Apify Actor standby HTTP server used for local development/testing
+- An Express HTTP server for local development and testing
 
 The hosted server (**[mcp.apify.com](https://mcp.apify.com)**) is implemented in an internal Apify repository that depends on this package.
 
@@ -15,7 +15,6 @@ For general information about the Apify MCP Server, features, tools, and client 
 
 ```text
 src/
-  actor/        Standby Actor HTTP server (used by src/main.ts in STANDBY mode)
   mcp/          MCP protocol implementation
   tools/        MCP tool implementations
   resources/    Resources and widgets metadata
@@ -31,8 +30,43 @@ Key entry points:
 - `src/index.ts` - Main library export (`ActorsMcpServer` class)
 - `src/index_internals.ts` - Internal exports for testing / advanced usage
 - `src/stdio.ts` - Standard input/output (CLI) entry point
-- `src/main.ts` - Actor entry point (standby server / debugging)
+- `src/dev_server.ts` - Express HTTP server for local development (`pnpm start`)
 - `src/input.ts` - Input processing and validation
+
+## Tool loading phases
+
+Tool loading is intentionally split into two phases in [`src/utils/tools_loader.ts`](./src/utils/tools_loader.ts):
+
+- `getActors()` — async, mode-agnostic. Fetches Actor metadata and preserves the caller's requested tool/actor selection without choosing any mode-dependent tool variants.
+- `getToolsForServerMode()` — sync, mode-dependent. Takes the pre-fetched sources plus a resolved `SERVER_MODE` and produces the concrete tool entries to expose to the client.
+- `loadToolsFromInput()` in `tools_loader.ts` — convenience wrapper running both phases back-to-back with an explicit `SERVER_MODE`. **Not to be confused with** `ActorsMcpServer.loadToolsFromInput()` (the public method), which queues sources when mode is still `'auto'` and registers them onto the server — call the server method from transport entry points, the plain function only when you already have a resolved mode.
+
+This split matters for `serverMode: 'auto'`.
+
+- Before `initialize`, the server does not yet know whether the client supports MCP Apps.
+- Public preload helpers such as `ActorsMcpServer.loadToolsByName()` and `loadToolsFromUrl()` therefore queue mode-agnostic sources first.
+- Actor tools may still be loaded immediately because they are mode-agnostic.
+- During `initialize`, once client capabilities are known, the server resolves the queued sources into the final mode-dependent tool set.
+
+Rule of thumb:
+
+- If code may run before `initialize` in `auto` mode, it must stay in the mode-agnostic phase.
+- Only code running after mode resolution should call `getToolsForServerMode()` or otherwise choose concrete mode-dependent tool variants.
+
+## Node.js version policy
+
+The minimum supported Node.js version is **22** (`engines.node >= 22.0.0` in `package.json`).
+
+**Why Node.js 22 (not 20):**
+
+- pnpm 11 (the pinned package manager) requires Node 22.13+, so the dev workflow needs Node 22+ regardless.
+- The CI test matrix runs on `[22, 24, 26]` — Node 20 is not validated pre-publish.
+- A matrix tarball smoke test on Node 20 at release time would close the gap, but the CI complexity isn't worth it given Sentry data shows Node 20 is a small user segment.
+- Setting `engines >= 22` matches what CI actually validates and what dev tooling already requires. It's the honest floor.
+
+If you ever want to lower the floor again, you'd need either an oxlint rule that flags unsupported Node builtins, or a matrix tarball smoke gate before `npm publish`. Don't lower `engines` without one of those in place.
+
+The `.nvmrc` file pins the dev-tooling Node version (currently 24) — this is intentionally higher than the published floor.
 
 ## How to contribute
 
@@ -40,63 +74,54 @@ Refer to the [CONTRIBUTING.md](./CONTRIBUTING.md) file.
 
 ### Installation
 
-First, install all the dependencies:
+This repo uses **pnpm 11+** as the package manager. corepack (bundled with Node 16+) reads
+`package.json#packageManager` and pins the exact version for you — no manual install needed.
 
 ```bash
-npm install
-cd src/web
-npm install
+corepack enable     # one-off, makes pnpm available
+pnpm install        # installs root + src/web (workspace package) in one pass
 ```
+
+`devEngines.packageManager` is pinned with `onFail: "error"`, so `npm install` / `yarn install` refuse to run inside the checkout — keeps the lockfile single-source.
 
 ### Working on the MCP Apps (ChatGPT Apps) UI widgets
 
-The MCP server uses UI widgets from the `src/web/` directory.
+Widget code lives in `src/web/` (a self-contained React project). Widgets are rendered based on tool output — to add data to a widget, modify the corresponding tool's return value.
+
+> **UI mode:** Widget rendering requires the server to run in UI mode. Use `?ui=true` (e.g., `/mcp?ui=true`) or set `UI_MODE=true`.
 
 See the [OpenAI Apps SDK documentation](https://developers.openai.com/apps-sdk) for background on MCP Apps and widgets.
 
 ### Production build
 
-If you need the compiled assets copied into the top-level `dist/web` for packaging or integration tests, build everything:
-
 ```bash
-npm run build
+pnpm run build
 ```
 
-This command builds the core project and the `src/web/` widgets, then copies the widgets into the `dist/` directory.
-
-All widget code lives in the self-contained `src/web/` React project. The widgets (MCP Apps) are rendered based on the structured output returned by MCP tools. If you need to add specific data to a widget, modify the corresponding MCP tool's output, since widgets can only render data returned by the MCP tool call result.
-
-> **Important (UI mode):** Widget rendering is enabled only when the server runs in UI mode. Use the `ui=true` query parameter (e.g., `/mcp?ui=true`) or set `UI_MODE=true`.
+Builds the core TypeScript project and `src/web/` widgets, then copies widgets into `dist/web/`. Required before running integration tests or the compiled server.
 
 ### Hot-reload development
 
-Run the orchestrator, which starts the web widgets builder in watch mode and the MCP server in standby mode:
-
 ```bash
-APIFY_TOKEN='your-apify-token' npm run dev
+pnpm run dev
 ```
 
-What happens:
-- The `src/web` project runs `npm run dev` and continuously writes compiled files to `src/web/dist`.
-- The MCP server reads widget assets directly from `src/web/dist` (compiled JS/HTML only; no TypeScript or JSX at runtime).
-- Editing files under `src/web/src/widgets/*.tsx` triggers a rebuild; the next widget render will use the updated code without restarting the server.
+Starts the web widgets builder in watch mode and the MCP server in standby mode on port `3001`. The dev server mirrors production auth — it does **not** read `APIFY_TOKEN` from its environment. Every request must carry the token via one of (in priority order):
 
-Notes:
-- You can get your `APIFY_TOKEN` from [Apify Console](https://console.apify.com/settings/integrations)
-- Widget discovery happens when the server connects. Changing widget code is hot-reloaded; adding brand-new widget filenames typically requires reconnecting the MCP client (or restarting the server) to expose the new resource.
-- You can preview widgets quickly via the local esbuild dev server at `http://localhost:3226/index.html`.
+1. `Authorization: Bearer <token>` header
+2. `?token=<token>` query parameter (handy for quick browser-based widget previews)
 
-The MCP server listens on port `3001`. The HTTP server implementation used here is the standby Actor server in `src/actor/server.ts` (used by `src/main.ts` in STANDBY mode). The hosted production server behind [mcp.apify.com](https://mcp.apify.com) is located in the internal Apify repository.
+Editing `src/web/src/widgets/*.tsx` triggers a hot-reload — the next widget render uses updated code without restarting the server. Adding new widget filenames requires reconnecting the MCP client to pick them up.
 
-### Using MCP servers with Claude Code
+- The repo's [`.mcp.json`](./.mcp.json) ships a `dev` entry wired with `Authorization: Bearer ${APIFY_TOKEN}` — `${APIFY_TOKEN}` is populated via [Claude Code setup](#configuring-apify_token-for-claude-code) below.
+- Get your Apify API token from [Apify Console](https://console.apify.com/settings/integrations)
+- Preview widgets via the local esbuild dev server at `http://localhost:3226/index.html`
 
-This repository includes a `.mcp.json` configuration file that allows you to use external MCP servers (like the Storybook MCP server) directly within Claude Code for enhanced development workflows.
+The MCP server listens on port `3001`. The HTTP server implementation is in `src/dev_server.ts`. The hosted production server behind [mcp.apify.com](https://mcp.apify.com) is located in the internal Apify repository.
 
-To use the Storybook MCP server (or any other MCP server that requires authentication), you need to configure your Apify API token in Claude Code's settings:
+### Configuring APIFY_TOKEN for Claude Code
 
-1. Get your Apify API token from [Apify Console](https://console.apify.com/settings/integrations)
-2. Create or edit `.claude/settings.local.json` file
-3. Add the following environment variable configuration:
+Create or edit `.claude/settings.local.json`:
 
 ```json
 {
@@ -106,81 +131,107 @@ To use the Storybook MCP server (or any other MCP server that requires authentic
 }
 ```
 
-4. Restart Claude Code for the changes to take effect
+Restart Claude Code for the change to take effect. This token is picked up by both Claude Code MCP servers (defined in `.mcp.json`) and mcpc.
 
-The `.mcp.json` file uses environment variable expansion (`${APIFY_TOKEN}`) to securely reference your token without hardcoding it in the configuration file. This allows you to share the configuration with your team while keeping credentials private.
+## Testing
 
-### Manual testing as an MCP client
+| Layer | Command | What it covers |
+|---|---|---|
+| **Unit tests** | `pnpm run test:unit` | Individual modules in isolation — no credentials needed |
+| **Integration tests** | `pnpm run test:integration` | Full server over all transports against real Apify API (requires `APIFY_TOKEN` + `pnpm run build`) |
+| **mcpc probing** | `mcpc @stdio tools-call ...` | Interactive end-to-end verification during development |
+| **LLM evals** | CI only — apply `validated` label | Runs `evals/run_evaluation.ts` against multiple models via OpenRouter; requires `PHOENIX_*` and `OPENROUTER_*` secrets |
 
-To test the MCP server, a human must first configure the MCP server. Once configured, the server exposes tools that become available to the coding agent.
+To trigger the eval workflow on a PR, apply the **`validated`** label.
+The workflow then runs automatically and posts results to Phoenix.
+It also runs automatically on every merge to the `master` branch.
 
-#### 1. Human setup (required before testing)
+### Test Actors
 
-1. **Configure the MCP server** in your environment (e.g., Claude Code, VS Code, Cursor)
-2. **Verify connection**: The client should connect and list available tools automatically
-3. **Tools are now available**: Once connected, all MCP tools are exposed and ready to use
+Integration tests run against two purpose-built Actors defined in [apify/mcp-server-test-actor](https://github.com/apify/mcp-server-test-actor) and referenced from [`tests/const.ts`](./tests/const.ts):
 
-#### 2. Coding agent MCP server testing
+| Actor | Constant | Purpose |
+|---|---|---|
+| `apify/normal-mode-test-actor` | `ACTOR_NORMAL_MODE` | A normal Actor that writes dataset and key-value-store output. Exercises `call-actor`, the canonical run response, and the storage tools (`get-dataset-items`, `get-dataset`, `get-key-value-store-*`). |
+| `apify/example-mcp-server` | `ACTOR_EXAMPLE_MCP_SERVER` | A standby MCP-server Actor. Exercises the MCP-in-MCP proxy path, where the server registers the Actor's own MCP tools as sub-tools. |
 
-**Note**: Only execute the tests when explicitly requested by the user.
+### Test structure
 
-Once the MCP server is configured, test the MCP tools by:
+- `tests/unit/` — unit tests for individual modules
+- `tests/integration/` — integration tests for MCP server functionality
+  - `tests/integration/suite.ts` — **main integration test suite** where all test cases should be added
+  - Other files in this directory set up different transport modes (stdio, streamable-http) that all use `suite.ts`
+- `tests/helpers.ts` — shared test utilities
+- `tests/const.ts` — test constants
 
-1. **Invoke each tool** through the MCP client (e.g., ask the AI agent to "search for Actors" or "fetch Actor details for apify/rag-web-browser")
-2. **Test with valid inputs** (happy path) — verify outputs match expected formats
-3. **Test with invalid inputs** (edge cases) — verify error messages are clear and helpful
-4. **Verify key behaviors**:
-   - All tools return helpful error messages with suggestions
-   - **get-actor-output** supports field filtering using dot notation
-   - Search tools support pagination with `limit` and `offset`
+### Test organization across repos
 
-**Tools to test:**
-- **search-actors** — Search Apify Store (test: valid keywords, empty keywords, non-existent platforms)
-- **fetch-actor-details** — Get Actor info (test: valid Actor, non-existent Actor)
-- **call-actor** — Execute an Actor with input
-- **get-actor-output** — Retrieve Actor results (test: valid datasetId, field filtering, non-existent dataset)
-- **search-apify-docs** — Search documentation (test: relevant terms, non-existent topics)
-- **fetch-apify-docs** — Fetch a doc page (test: valid URL, non-existent page)
+This package is also used by the hosted server in `apify-mcp-server-internal`. To avoid copying test bodies across the boundary, each repo owns its own tests.
+
+**Tests in this repo** cover the package's MCP and library surface. They live in `tests/integration/suite.ts` and `tests/unit/`:
+
+- MCP protocol — `initialize` handshake, request/response shapes for `tools/*`, `prompts/*`, `resources/*`, `tasks/*`, notification delivery, JSON-RPC error codes.
+- Package logic — tool loader and selectors, widget metadata shape, structured output schemas, prompt registry, built-in tools, `call-actor` `RunResponse` shape, `SkyfirePaymentProvider`, client-name capability detection, `?ui=` server-mode parsing.
+
+**Tests not in this repo** — anything that only makes sense with the hosted stack:
+
+- IAM auth gate (401, unauth user toolset filter, `?payment=skyfire` bypass), rate limiter, `RedisEventStore` replay via `Last-Event-ID`, user-aware rental Actor filter, non-MCP HTTP routes (`/`, OAuth metadata, server card).
+- Multi-node coordination — cross-node session continuity and cancellation, failover through the Caddy load balancer.
+
+Those live in `apify-mcp-server-internal`, together with a small **contract smoke suite** that re-asserts our package's behavior survives the hosted server's extra code (auth, rate limiter, Caddy, response handlers). We don't maintain that suite — internal does — but we should know it exists.
+
+#### When your change affects the hosted server
+
+The hosted server wraps this package with auth, rate limiter, Caddy, and response handlers. Any of that can change, drop, or delay something we produce; our tests don't see that wrapping. So if you change something the hosted server consumes — `internals.js` exports, `_meta` shape, `structuredContent`, anything that depends on `clientInfo`, `?ui=` / `?payment=` parsing, the timing of notifications — flag it in the PR. Internal's contract suite likely needs a matching test.
+
+#### Don't delete a public test thinking internal covers it
+
+The flow is one way. We're the source; internal smokes guard the package's output as it passes through the hosted server. If you cut a test here, internal has no way to catch the regression on its own.
+
+### Live probing with mcpc
+
+`mcpc` (`@apify/mcpc`) provides a CLI feedback loop against the local server.
+
+#### Setup
+
+```bash
+pnpm add -g @apify/mcpc
+pnpm run build
+mcpc --config .mcp.json stdio connect @stdio
+mcpc @stdio tools-list   # verify
+```
+
+#### Usage
+
+Arguments use `key:=value` syntax (auto-parses as JSON):
+
+```bash
+mcpc @stdio tools-list
+mcpc @stdio tools-call search-actors keywords:="web scraper" limit:=5
+mcpc --json @stdio tools-call search-actors keywords:="scraper" | jq ‘.content[0].text’
+```
+
+**Key behaviors to verify:**
+- `search-actors` — test valid keywords, empty keywords
+- `fetch-actor-details` — test valid Actor, non-existent Actor
+- `call-actor` — test with valid input; check async mode
+- `get-dataset-items` — test field filtering with dot notation, non-existent dataset
+- `search-apify-docs` / `fetch-apify-docs` — test relevant and non-existent queries
+
 
 ### Testing with MCPJam (optional)
 
-You can use [MCPJam](https://www.mcpjam.com/) to connect to and test the MCP server - run it using `npx @mcpjam/inspector@latest`.
+Run [MCPJam](https://www.mcpjam.com/) with `npx @mcpjam/inspector@latest`.
 
-#### Setting up the connection
-
-1. Click **"Add new server"**
-2. Fill in a name for the server
-3. Enter the URL: `http://localhost:3001/mcp?ui=true` (Note: the `ui=openai` query parameter is required for widget rendering)
-4. Select **"No authentication"** as the auth method
-5. Click **Add**
-
-#### Testing tools manually
-
-To test how widgets are rendered per tool call:
-
-1. Navigate to the **"App Builder"** section in the left sidebar
-2. Select a tool
-3. Fill in the required arguments
-4. Execute the tool
-5. View the rendered widget (or the raw MCP tool result if the tool doesn't return a widget)
-
-#### Testing via chat
-
-For a better testing experience with widget rendering:
-
-1. Navigate to the **"Chat"** section in the left sidebar
-2. Add your `OPENAI_API_KEY` (or Anthropic API key, or OpenRouter API key)
-3. Chat with the MCP server directly, widgets will be rendered inline
+1. Click **"Add new server"**, enter URL `http://localhost:3001/mcp?ui=true`, select **"No authentication"**
+2. **App Builder** — select a tool, fill arguments, execute, view rendered widget
+3. **Chat** — add an OpenAI/Anthropic/OpenRouter API key to chat with widget rendering inline
 
 ### Testing with ChatGPT (optional)
 
-You can test widget rendering on [chatgpt.com](https://chatgpt.com) by exposing the local server via ngrok. See the [Apify ChatGPT integration docs](https://docs.apify.com/platform/integrations/chatgpt) for background.
+Test widget rendering on [chatgpt.com](https://chatgpt.com) by exposing the local server via ngrok. See the [Apify ChatGPT integration docs](https://docs.apify.com/platform/integrations/chatgpt) for background.
 
-#### Setting up ngrok
-
-The ngrok account credentials are stored in **1Password**. The static domain `mcp-apify.ngrok.dev` has already been created — no setup required.
-
-Add the following to `~/.config/ngrok/ngrok.yml`:
+The ngrok credentials are in **1Password**. The static domain `mcp-apify.ngrok.dev` is already set up — add to `~/.config/ngrok/ngrok.yml`:
 
 ```yaml
 tunnels:
@@ -196,14 +247,13 @@ Then start the tunnel:
 ngrok start app
 ```
 
-The MCP server API will be reachable at `https://mcp-apify.ngrok.dev/mcp?ui=true`.
+The MCP server API will be reachable at `https://mcp-apify.ngrok.dev/?ui=true`.
 
 #### Adding the server in ChatGPT
 
 1. Go to [chatgpt.com](https://chatgpt.com) and open **Settings → Connectors**
 2. Click **"Add a custom connector"**
-3. Enter the URL: `https://mcp-apify.ngrok.dev/mcp?ui=true`
+3. Enter the URL: `https://mcp-apify.ngrok.dev/?ui=true`
 4. Save and start a new chat
 
 > **Important:** After restarting ngrok, use the **Refresh** button in the connector settings to reconnect — ChatGPT does not detect the tunnel restart automatically.
-4. Client receives only MCP-compliant fields such as `content`, `isError`, `structuredContent`, and `_meta`.

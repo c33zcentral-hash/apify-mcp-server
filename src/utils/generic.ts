@@ -31,7 +31,10 @@ export function parseCommaSeparatedList(input?: string): string[] {
     if (!input) {
         return [];
     }
-    return input.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+    return input
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
 }
 
 /**
@@ -56,52 +59,33 @@ export function parseQueryParamList(param?: string | string[]): string[] {
 }
 
 /**
- * Recursively gets the value in a nested object for each key in the keys array.
- * Each key can be a dot-separated path (e.g. 'a.b.c').
- * Returns an object mapping each key to its resolved value (or undefined if not found).
- *
- * @example
- * const obj = { a: { b: { c: 42 } }, nested: { d: 100 } };
- * const value = getValuesByDotKeys(obj, ['a.b.c', 'a.b.d', 'nested']);
- * value; // { 'a.b.c': 42, 'a.b.d': undefined, 'nested': { d: 100 } }
+ * Backtick + straight & smart double-quote chars LLMs wrap user inputs in.
+ * Shared between `stripQuoteWrappers` (which also strips apostrophes from ids)
+ * and `normalizeRecordKey` (which preserves apostrophes in KV record keys).
+ * Single source of truth: extend here and both call sites pick it up.
  */
-export function getValuesByDotKeys(obj: Record<string, unknown>, keys: string[]): Record<string, unknown> {
-    const result: Record<string, unknown> = {};
-    for (const key of keys) {
-        const path = key.split('.');
-        let current: unknown = obj;
-        for (const segment of path) {
-            if (
-                current !== null
-                && typeof current === 'object'
-                && Object.prototype.hasOwnProperty.call(current, segment)
-            ) {
-                // Use index signature to avoid 'any' and type errors
-                current = (current as Record<string, unknown>)[segment];
-            } else {
-                current = undefined;
-                break;
-            }
-        }
-        result[key] = current;
-    }
-    return result;
-}
+export const QUOTE_WRAPPER_CHARS = '`"“”‘’';
 
 /**
- * Validates whether a given string is a well-formed URL.
+ * Strip surrounding quote/backtick wrappers and whitespace from an LLM-supplied id.
  *
- * Allows only valid HTTP or HTTPS URLs.
+ * LLMs paste names wrapped in markdown backticks or smart quotes; the Apify API
+ * treats those as distinct strings and 404s. Strips any leading/trailing run of
+ * `` ` ``, `'`, `"` or smart quotes — handles matched pairs, unpaired leakage,
+ * and nested wrappers (`` `"id"` ``) uniformly.
  */
-export function isValidHttpUrl(urlString: string): boolean {
-    if (!urlString.startsWith('http://') && !urlString.startsWith('https://')) {
-        return false;
-    }
+const STRIP_QUOTE_WRAPPERS_REGEX = new RegExp(`^[${QUOTE_WRAPPER_CHARS}']+|[${QUOTE_WRAPPER_CHARS}']+$`, 'g');
+export function stripQuoteWrappers(s: string): string {
+    return s.trim().replace(STRIP_QUOTE_WRAPPERS_REGEX, '').trim();
+}
+
+/** Best-effort byte size of a value for summaries. */
+export function computeValueBytes(value: unknown): number | undefined {
+    if (Buffer.isBuffer(value)) return value.length;
+    if (typeof value === 'string') return Buffer.byteLength(value);
     try {
-        /* eslint-disable no-new */
-        new URL(urlString);
-        return true;
+        return Buffer.byteLength(JSON.stringify(value));
     } catch {
-        return false;
+        return undefined;
     }
 }

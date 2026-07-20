@@ -1,8 +1,10 @@
 # This file tells Git which files shouldn't be added to source control
 
 .idea
-.vscode
-storage
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+/storage
 apify_storage
 crawlee_storage
 node_modules
@@ -20,6 +22,8 @@ storage/key_value_stores/default/*
 
 # Aider coding agent files
 .aider*
+.codex
+.shepherd
 
 
 # MCP registry private key
@@ -34,3 +38,4 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+dev.log

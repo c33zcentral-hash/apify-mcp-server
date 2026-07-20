@@ -19,7 +19,7 @@ To trigger evaluations on a PR, add the `validated` label to your pull request.
 
 ## Why OpenRouter?
 
-unified API for Gemini, Claude, GPT. no separate integrations needed.
+Unified API for Gemini, Claude, GPT. No separate integrations needed.
 
 ## Judge model
 
@@ -43,26 +43,26 @@ export PHOENIX_API_KEY="your_key"
 export OPENROUTER_API_KEY="your_key"
 export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
 
-npm ci
-npm run evals:create-dataset  # one-time: creates dataset from test_cases.json
-npm run evals:run              # runs evaluation on default dataset (v1.4)
+pnpm install --frozen-lockfile
+pnpm run evals:create-dataset  # one-time: creates dataset from test_cases.json
+pnpm run evals:run              # runs evaluation on default dataset (v1.7)
 ```
 
 ### Using a specific dataset version
 
-By default, the evaluation uses the dataset version from `test_cases.json` (`v1.4`). To use a different dataset:
+By default, the evaluation uses the dataset version from `test_cases.json` (`v1.7`). To use a different dataset:
 
 ```bash
 # Create a new dataset with custom name
-npm run evals:create-dataset -- --dataset-name mcp_server_dataset_v1.3
+pnpm run evals:create-dataset -- --dataset-name mcp_server_dataset_v1.3
 
 # Run evaluation on custom dataset
-npm run evals:run -- --dataset-name mcp_server_dataset_v1.3
+pnpm run evals:run -- --dataset-name mcp_server_dataset_v1.3
 ```
 
 ## Test cases
 
-**Current version: v1.4** (74 test cases)
+**Current version: v1.7**
 
 **Changes in v1.4:**
 - Fixed contradictory test cases (search-actors-1, search-actors-15)
@@ -75,9 +75,9 @@ npm run evals:run -- --dataset-name mcp_server_dataset_v1.3
 - Added missing tool descriptions to judge prompt (get-actor-output, fetch-apify-docs)
 - Clarified information vs data retrieval intent in tool descriptions:
   - search-actors: Emphasizes finding/discovering what tools exist (informational intent)
-  - apify-slash-rag-web-browser: Emphasizes getting/retrieving actual data (data retrieval intent)
+  - apify--rag-web-browser: Emphasizes getting/retrieving actual data (data retrieval intent)
 
-Test categories: `fetch-actor-details`, `search-actors`, `apify-slash-rag-web-browser`, `search-apify-docs`, `call-actor`, `get-actor-output`, `fetch-apify-docs`
+Test categories: `fetch-actor-details`, `search-actors`, `apify--rag-web-browser`, `search-apify-docs`, `call-actor`, `get-dataset-items`, `fetch-apify-docs`, `get-dataset`, `get-dataset-schema`, `get-dataset-list`, `get-key-value-store-record`, `get-key-value-store-keys`, `get-key-value-store`, `get-key-value-store-list`
 
 ## Output
 
@@ -96,7 +96,7 @@ Test categories: `fetch-actor-details`, `search-actors`, `apify-slash-rag-web-br
 
 ### Test case structure
 
-Each test case in `test-cases.json` has this structure:
+Each test case in `test_cases.json` has this structure:
 
 ```json
 {
@@ -132,21 +132,16 @@ Each test case in `test-cases.json` has this structure:
 }
 ```
 
-### Advanced examples with context
+### Advanced examples
 
-**Multi-step conversation flow:**
+**With reference explanation:**
 ```json
 {
-  "id": "weather-mcp-search-then-call-1",
-  "category": "flow",
-  "query": "Now, use the mcp to check the weather in Prague, Czechia?",
-  "expectedTools": ["call-actor"],
-  "context": [
-    { "role": "user", "content": "Search for weather MCP server" },
-    { "role": "assistant", "content": "I'll help you to do that" },
-    { "role": "tool_use", "tool": "search-actors", "input": {"search": "weather mcp", "limit": 5} },
-    { "role": "tool_result", "tool_use_id": 12, "content": "Tool 'search-actors' successful, Actor found: jiri.spilka/weather-mcp-server" }
-  ]
+  "id": "search-vs-rag-7b",
+  "category": "search-actors",
+  "query": "Is there a tool for scraping LinkedIn profiles?",
+  "expectedTools": ["search-actors"],
+  "reference": "User is asking whether a tool exists — informational intent, not data retrieval. Use search-actors to discover available actors."
 }
 ```
 

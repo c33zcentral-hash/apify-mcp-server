@@ -42,7 +42,7 @@ jobs:
             changelog: ${{ steps.release_metadata.outputs.changelog }}
             release_notes: ${{ steps.release_metadata.outputs.release_notes }}
         steps:
-            -   uses: apify/workflows/git-cliff-release@main
+            -   uses: apify/actions/git-cliff-release@v1.1.2
                 name: Prepare release metadata
                 id: release_metadata
                 with:
@@ -56,7 +56,7 @@ jobs:
         name: Update changelog
         runs-on: ubuntu-latest
         outputs:
-            changelog_commitish: ${{ steps.commit.outputs.commit_long_sha || github.sha }}
+            changelog_commitish: ${{ steps.commit.outputs.commit_long_sha }}
 
         steps:
             -   name: Checkout repository
@@ -64,13 +64,10 @@ jobs:
                 with:
                     token: ${{ secrets.APIFY_SERVICE_ACCOUNT_GITHUB_TOKEN }}
 
-            -   name: Use Node.js
-                uses: actions/setup-node@v6
-                with:
-                    node-version-file: '.nvmrc'
-
+            # No Node/pnpm setup needed here — we only edit JSON files with jq,
+            # which is preinstalled on GitHub-hosted runners.
             -   name: Update package version in package.json
-                run: npm version --no-git-tag-version --allow-same-version ${{ needs.release_metadata.outputs.version_number }}
+                run: jq '.version = "${{ needs.release_metadata.outputs.version_number }}"' package.json > package.json.tmp && mv package.json.tmp package.json
 
             -   name: Update manifest.json version
                 run: jq '.version = "${{ needs.release_metadata.outputs.version_number }}"' manifest.json > manifest.json.tmp && mv manifest.json.tmp manifest.json
@@ -87,8 +84,7 @@ jobs:
 
             -   name: Commit changes
                 id: commit
-                uses: EndBug/add-and-commit@v9
+                uses: apify/actions/signed-commit@v1.0.0
                 with:
-                    author_name: Apify Release Bot
-                    author_email: noreply@apify.com
                     message: "chore(release): Update changelog, package.json, manifest.json and server.json versions [skip ci]"
+                    github-token: ${{ secrets.APIFY_SERVICE_ACCOUNT_GITHUB_TOKEN }}
